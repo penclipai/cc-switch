@@ -12,6 +12,7 @@ import {
   Folder,
   Globe,
   Info,
+  KeyRound,
   Loader2,
   Route,
   SlidersHorizontal,
@@ -36,6 +37,7 @@ import { BackupListSection } from "@/components/settings/BackupListSection";
 import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
 import { AboutSection } from "@/components/settings/AboutSection";
 import { RoutingSection } from "@/components/settings/sections/RoutingSection";
+import { ApiKeyVarsSection } from "@/components/settings/sections/ApiKeyVarsSection";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { LogConfigPanel } from "@/components/settings/LogConfigPanel";
 import { GeneralSection } from "@/components/settings/sections/GeneralSection";
@@ -58,6 +60,7 @@ const SECTION_ICON: Record<
   general: SlidersHorizontal,
   appConfig: Folder,
   routing: Route,
+  apiKeyVars: KeyRound,
   network: Globe,
   data: Database,
   about: Info,
@@ -377,6 +380,10 @@ export function SettingsPage({
         );
       case "routing":
         return <RoutingSection onOpenApp={onOpenApp} />;
+      case "apiKeyVars":
+        return (
+          <ApiKeyVarsSection settings={settings} onAutoSave={handleAutoSave} />
+        );
       case "network":
         return (
           <SettingsBlock
