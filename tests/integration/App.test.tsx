@@ -1,4 +1,4 @@
-import { Suspense, type ComponentType } from "react";
+import { Suspense, useRef, useState, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   render,
@@ -23,6 +23,9 @@ const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
 const skillsPanelMocks = vi.hoisted(() => ({
   initialViews: [] as string[],
+}));
+const usageModalMocks = vi.hoisted(() => ({
+  closedProviderIds: [] as string[],
 }));
 
 vi.mock("sonner", () => ({
@@ -124,14 +127,41 @@ vi.mock("@/components/providers/EditProviderDialog", async () => {
 });
 
 vi.mock("@/components/UsageScriptModal", () => ({
-  default: ({ isOpen, provider, onSave, onClose }: any) =>
-    isOpen ? (
+  default: ({ isOpen, provider, onSave, onClose }: any) => {
+    const [saving, setSaving] = useState(false);
+    const savingRef = useRef(false);
+    const save = async () => {
+      if (savingRef.current) return;
+      savingRef.current = true;
+      setSaving(true);
+      try {
+        await onSave({
+          enabled: false,
+          language: "javascript",
+          code: "",
+        });
+        onClose();
+        usageModalMocks.closedProviderIds.push(provider?.id);
+      } catch {
+        // The production modal leaves the panel open after the save owner toasts.
+      } finally {
+        savingRef.current = false;
+        setSaving(false);
+      }
+    };
+
+    return isOpen ? (
       <div data-testid="usage-modal">
         <span data-testid="usage-provider">{provider?.id}</span>
-        <button onClick={() => onSave("script-code")}>save-script</button>
-        <button onClick={() => onClose()}>close-usage</button>
+        <button disabled={saving} onClick={() => void save()}>
+          save-script
+        </button>
+        <button disabled={saving} onClick={() => onClose()}>
+          close-usage
+        </button>
       </div>
-    ) : null,
+    ) : null;
+  },
 }));
 
 vi.mock("@/components/ConfirmDialog", () => ({
@@ -198,6 +228,7 @@ describe("App integration with MSW", () => {
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
     skillsPanelMocks.initialViews = [];
+    usageModalMocks.closedProviderIds = [];
     localStorage.removeItem("cc-switch-last-view");
     localStorage.removeItem("cc-switch-last-app");
   });
@@ -222,7 +253,14 @@ describe("App integration with MSW", () => {
     fireEvent.click(screen.getByText("usage"));
     expect(screen.getByTestId("usage-modal")).toBeInTheDocument();
     fireEvent.click(screen.getByText("save-script"));
-    fireEvent.click(screen.getByText("close-usage"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("usage-modal")).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        '"usage_script":{"enabled":false,"language":"javascript","code":""}',
+      ),
+    );
 
     fireEvent.click(screen.getByText("create"));
     expect(screen.getByTestId("add-provider-dialog")).toBeInTheDocument();
@@ -258,6 +296,62 @@ describe("App integration with MSW", () => {
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
   }, 10_000);
+
+  it("keeps a newly opened usage modal when an earlier save finishes after navigation", async () => {
+    let releaseOldSave!: () => void;
+    let oldSaveStarted = false;
+    const oldSaveGate = new Promise<void>((resolve) => {
+      releaseOldSave = resolve;
+    });
+    server.use(
+      http.post("http://tauri.local/update_provider", async ({ request }) => {
+        const { app, provider } = (await request.json()) as {
+          app: string;
+          provider: { id: string };
+        };
+        if (app !== "codex" || provider.id !== "codex-1") return;
+
+        oldSaveStarted = true;
+        await oldSaveGate;
+        return HttpResponse.json(true);
+      }),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    fireEvent.click(sidebarApp("Codex"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list")).toHaveTextContent("codex-1"),
+    );
+    fireEvent.click(screen.getByText("usage"));
+    expect(screen.getByTestId("usage-provider")).toHaveTextContent("codex-1");
+    fireEvent.click(screen.getByText("save-script"));
+    await waitFor(() => expect(oldSaveStarted).toBe(true));
+
+    try {
+      fireEvent.click(sidebarApp("Claude Code"));
+      await waitFor(() =>
+        expect(screen.getByTestId("provider-list")).toHaveTextContent(
+          "claude-1",
+        ),
+      );
+      fireEvent.click(screen.getByText("usage"));
+      expect(screen.getByTestId("usage-provider")).toHaveTextContent(
+        "claude-1",
+      );
+
+      releaseOldSave();
+      await waitFor(() =>
+        expect(usageModalMocks.closedProviderIds).toContain("codex-1"),
+      );
+      expect(screen.getByTestId("usage-provider")).toHaveTextContent(
+        "claude-1",
+      );
+    } finally {
+      releaseOldSave();
+    }
+  });
 
   it("resets provider view scroll when switching apps", async () => {
     const { default: App } = await import("@/App");

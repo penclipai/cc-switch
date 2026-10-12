@@ -1662,12 +1662,16 @@ function App() {
           provider={effectiveUsageProvider}
           appId={activeApp}
           isOpen={Boolean(usageProvider)}
-          onClose={() => setUsageProvider(null)}
-          onSave={(script) => {
-            if (usageProvider) {
-              void saveUsageScript(usageProvider, script);
-            }
-          }}
+          onClose={() =>
+            setUsageProvider((current) =>
+              current === usageProvider ? null : current,
+            )
+          }
+          onSave={(script) =>
+            usageProvider
+              ? saveUsageScript(usageProvider, script)
+              : Promise.resolve()
+          }
         />
       )}
 

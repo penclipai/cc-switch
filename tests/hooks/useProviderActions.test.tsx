@@ -651,9 +651,9 @@ describe("useProviderActions", () => {
       wrapper,
     });
 
-    await act(async () => {
-      await result.current.saveUsageScript(provider, script);
-    });
+    await expect(
+      result.current.saveUsageScript(provider, script),
+    ).rejects.toThrow("Save failed");
 
     expect(toastErrorMock).toHaveBeenCalledTimes(1);
     expect(toastErrorMock.mock.calls[0]?.[0]).toBe("Save failed");
@@ -703,9 +703,9 @@ describe("useProviderActions", () => {
       wrapper,
     });
 
-    await act(async () => {
-      await result.current.saveUsageScript(provider, script);
-    });
+    await expect(
+      result.current.saveUsageScript(provider, script),
+    ).rejects.toThrow();
 
     expect(toastErrorMock).toHaveBeenCalledTimes(1);
     expect(toastErrorMock.mock.calls[0]?.[0]).toBe("用量查询配置保存失败");

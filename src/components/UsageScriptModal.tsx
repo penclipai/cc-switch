@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Play, Wand2, Eye, EyeOff, Save, ExternalLink } from "lucide-react";
 import { toast } from "@/lib/toast";
 import { useTranslation } from "react-i18next";
@@ -49,7 +49,7 @@ interface UsageScriptModalProps {
   appId: AppId;
   isOpen: boolean;
   onClose: () => void;
-  onSave: (script: UsageScript) => void;
+  onSave: (script: UsageScript) => void | Promise<void>;
 }
 
 // 生成预设模板的函数（支持国际化）
@@ -374,6 +374,8 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   });
 
   const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
   // {{apiKey}}/{{baseUrl}} 实际注入值，镜像后端 resolve_script_credentials 的
   // 优先级：脚本配置中的显式非空值优先（旧配置可能携带），否则回退供应商凭据。
@@ -496,7 +498,9 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
     setScript({ ...script, enabled: true });
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    if (savingRef.current) return;
+
     // 专用模板不需要脚本验证
     if (!NATIVE_USAGE_TEMPLATES.has(selectedTemplate || "")) {
       if (script.enabled && !script.code.trim()) {
@@ -521,8 +525,21 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         | "official_subscription"
         | undefined,
     };
-    onSave(scriptWithTemplate);
-    onClose();
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await onSave(scriptWithTemplate);
+      onClose();
+    } catch {
+      // The save owner already presents errors using its established toast contract.
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+
+  const handleClose = () => {
+    if (!savingRef.current) onClose();
   };
 
   const handleTest = async () => {
@@ -875,12 +892,13 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
       <div className="flex gap-2">
         <Button
           variant="outline"
-          onClick={onClose}
+          onClick={handleClose}
+          disabled={saving}
           className="border-border/20 hover:bg-subtle hover:text-accent-foreground"
         >
           {t("common.cancel")}
         </Button>
-        <Button onClick={handleSave}>
+        <Button onClick={() => void handleSave()} disabled={saving}>
           <Save size={16} className="mr-2" />
           {t("usageScript.saveConfig")}
         </Button>
@@ -893,7 +911,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
       isOpen={isOpen}
       trackUnsavedChanges
       title={`${t("usageScript.title")} - ${provider.name}`}
-      onClose={onClose}
+      onClose={handleClose}
       footer={footer}
     >
       <div className="glass rounded-xl border border-white/10 px-6 py-4 flex items-center justify-between gap-4">
