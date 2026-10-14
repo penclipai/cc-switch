@@ -50,7 +50,7 @@ const BEDROCK_IDS: &[&str] = &["amazon-bedrock", "amazon-bedrock-runtime"];
 const LEGACY_REROUTE_ID: &str = "cc-switch";
 
 /// 顶层的关键字段里，直接取行里值的那几个（选路、凭据、模型目录指针另算）。
-const ROW_TOP_FIELDS: &[&str] = &[
+pub(crate) const ROW_TOP_FIELDS: &[&str] = &[
     "model",
     "review_model",
     "model_reasoning_effort",
@@ -131,6 +131,22 @@ fn config_error(zh: impl Into<String>, en: impl Into<String>) -> AppError {
 
 impl CodexProjection {
     pub fn of(input: &RowInput<'_>) -> Result<Self, AppError> {
+        // Key 字段里的 `{{NAME}}` 变量引用在这里换成当前值
+        let resolved = crate::services::api_key_vars::resolve::resolve_settings_lossy(
+            &crate::app_config::AppType::Codex,
+            input.settings,
+        );
+        let resolved_input = RowInput {
+            settings: &resolved,
+            official: input.official,
+            proxy_injected_oauth: input.proxy_injected_oauth,
+        };
+        Self::of_raw(&resolved_input)
+    }
+
+    /// Project a provider row for editor persistence without resolving API-key
+    /// variable templates. Resolution is only for live/proxy writes.
+    pub(crate) fn of_raw(input: &RowInput<'_>) -> Result<Self, AppError> {
         let settings = input
             .settings
             .as_object()

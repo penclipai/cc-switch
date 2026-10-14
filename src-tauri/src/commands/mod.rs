@@ -1,11 +1,13 @@
 #![allow(non_snake_case)]
 
+mod api_key_vars;
 mod auth;
 mod balance;
 mod codex_oauth;
 mod coding_plan;
 mod config;
 mod copilot;
+mod custom_icon;
 mod deeplink;
 mod env;
 mod failover;
@@ -37,12 +39,14 @@ mod usage;
 mod webdav_sync;
 mod workspace;
 
+pub use api_key_vars::*;
 pub use auth::*;
 pub use balance::*;
 pub use codex_oauth::*;
 pub use coding_plan::*;
 pub use config::*;
 pub use copilot::*;
+pub use custom_icon::*;
 pub use deeplink::*;
 pub use env::*;
 pub use failover::*;

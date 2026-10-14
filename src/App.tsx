@@ -47,6 +47,12 @@ import {
   useTrayNavigation,
 } from "@/hooks/useTrayNavigation";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
+import {
+  API_KEY_VAR_REFRESHED_EVENT,
+  API_KEY_VAR_REFRESH_FAILED_EVENT,
+  API_KEY_VARS_QUERY_KEY,
+  type ApiKeyVarRefreshOutcome,
+} from "@/lib/api/apiKeyVars";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import {
   extractErrorMessage,
@@ -431,6 +437,33 @@ function App() {
     };
   }, [activeApp, queryClient, refetch]);
 
+  // API Key 变量自动刷新：成功静默刷新缓存；失败弹提示（含过期警告）
+  useTauriEvent<ApiKeyVarRefreshOutcome>(
+    API_KEY_VAR_REFRESHED_EVENT,
+    async (outcome) => {
+      await queryClient.invalidateQueries({ queryKey: API_KEY_VARS_QUERY_KEY });
+      if (outcome?.liveErrors?.length) {
+        toast.warning(
+          t("apiKeyVars.liveUpdateFailed", {
+            name: outcome.name,
+            error: outcome.liveErrors.join("; "),
+          }),
+        );
+      }
+    },
+  );
+  useTauriEvent<ApiKeyVarRefreshOutcome>(
+    API_KEY_VAR_REFRESH_FAILED_EVENT,
+    async (outcome) => {
+      await queryClient.invalidateQueries({ queryKey: API_KEY_VARS_QUERY_KEY });
+      if (!outcome) return;
+      const key = outcome.valueExpired
+        ? "apiKeyVars.autoRefreshFailedExpired"
+        : "apiKeyVars.autoRefreshFailed";
+      toast.error(t(key, { name: outcome.name, error: outcome.error ?? "" }));
+    },
+  );
+
   useTauriEvent("universal-provider-synced", async () => {
     await queryClient.invalidateQueries({ queryKey: ["providers"] });
     try {
@@ -680,6 +713,8 @@ function App() {
       return;
     }
     if (managementBusyRef.current) return;
+    // 再点当前页不会离开：不弹确认，也不能清掉编辑页的未保存登记
+    if (currentViewRef.current === page) return;
     if (confirmLeave(() => openPage(page))) return;
     closeProviderPanels();
     if (page === "prompts" && currentViewRef.current !== "prompts") {
@@ -1629,12 +1664,16 @@ function App() {
           provider={effectiveUsageProvider}
           appId={activeApp}
           isOpen={Boolean(usageProvider)}
-          onClose={() => setUsageProvider(null)}
-          onSave={(script) => {
-            if (usageProvider) {
-              void saveUsageScript(usageProvider, script);
-            }
-          }}
+          onClose={() =>
+            setUsageProvider((current) =>
+              current === usageProvider ? null : current,
+            )
+          }
+          onSave={(script) =>
+            usageProvider
+              ? saveUsageScript(usageProvider, script)
+              : Promise.resolve()
+          }
         />
       )}
 

@@ -595,6 +595,13 @@ impl ClaudeAdapter {
 
     /// 从 Provider 配置中提取 API Key
     fn extract_key(&self, provider: &Provider) -> Option<String> {
+        // `{{NAME}}` 变量引用换成当前值；无法解析时视为没有 Key，绝不发给上游
+        self.extract_key_literal(provider)
+            .and_then(|key| crate::services::api_key_vars::resolve::resolve_key_for_use(&key))
+            .filter(|key| !key.is_empty())
+    }
+
+    fn extract_key_literal(&self, provider: &Provider) -> Option<String> {
         if let Some(env) = provider.settings_config.get("env") {
             // Anthropic 标准 key
             if let Some(key) = env
@@ -828,6 +835,14 @@ impl ProviderAdapter for ClaudeAdapter {
             ProviderType::OpenRouter => Some(AuthInfo::new(key, AuthStrategy::Bearer)),
             ProviderType::ClaudeAuth => Some(AuthInfo::new(key, AuthStrategy::ClaudeAuth)),
             _ => {
+                // OpenAI Chat / Responses 协议只认 Authorization: Bearer；变量名推断只对
+                // Anthropic Messages 上游有意义，选了 ANTHROPIC_API_KEY 也不能发 x-api-key。
+                if matches!(
+                    self.get_api_format(provider),
+                    "openai_chat" | "openai_responses"
+                ) {
+                    return Some(AuthInfo::new(key, AuthStrategy::Bearer));
+                }
                 // 按 env 中的变量名推断鉴权策略，对齐 Anthropic SDK 语义：
                 // ANTHROPIC_AUTH_TOKEN → Authorization: Bearer
                 // ANTHROPIC_API_KEY    → x-api-key
@@ -1072,6 +1087,58 @@ mod tests {
 
         let auth = adapter.extract_auth(&provider).unwrap();
         assert_eq!(auth.api_key, "sk-ant-test-key");
+        assert_eq!(auth.strategy, AuthStrategy::Anthropic);
+    }
+
+    #[test]
+    fn test_extract_auth_openai_formats_always_use_bearer() {
+        // 认证字段选了 ANTHROPIC_API_KEY、上游却是 OpenAI 协议：x-api-key 会被拒，必须发 Bearer。
+        let adapter = ClaudeAdapter::new();
+        for format in ["openai_chat", "openai_responses"] {
+            for env in [
+                json!({
+                    "ANTHROPIC_BASE_URL": "https://api.example.com",
+                    "ANTHROPIC_API_KEY": "sk-test"
+                }),
+                json!({
+                    "ANTHROPIC_BASE_URL": "https://api.example.com",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-test"
+                }),
+            ] {
+                let provider = create_provider_with_meta(
+                    json!({ "env": env }),
+                    ProviderMeta {
+                        api_format: Some(format.to_string()),
+                        ..Default::default()
+                    },
+                );
+                let auth = adapter.extract_auth(&provider).unwrap();
+                assert_eq!(auth.strategy, AuthStrategy::Bearer, "{format}");
+                let headers = adapter.get_auth_headers(&auth).unwrap();
+                assert_eq!(headers.len(), 1);
+                assert_eq!(headers[0].0.as_str(), "authorization");
+                assert_eq!(headers[0].1.to_str().unwrap(), "Bearer sk-test");
+            }
+        }
+    }
+
+    #[test]
+    fn test_extract_auth_anthropic_format_keeps_env_var_semantics() {
+        // Anthropic Messages 上游照旧按变量名区分（bdc4c1e8b 修的严格端点不能回退）。
+        let adapter = ClaudeAdapter::new();
+        let provider = create_provider_with_meta(
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.example.com",
+                    "ANTHROPIC_API_KEY": "sk-test"
+                }
+            }),
+            ProviderMeta {
+                api_format: Some("anthropic".to_string()),
+                ..Default::default()
+            },
+        );
+        let auth = adapter.extract_auth(&provider).unwrap();
         assert_eq!(auth.strategy, AuthStrategy::Anthropic);
     }
 

@@ -108,6 +108,8 @@ pub struct TrayTexts {
     pub problem_service_down: &'static str,
     pub problem_attach_failed: &'static str,
     pub problem_switch_failed: &'static str,
+    /// API Key 变量刷新失败：`{name}`、`{reason}`。
+    pub problem_api_key_var_failed: &'static str,
     pub problem_more: &'static str,
     pub desktop_unavailable: &'static str,
     /// 出问题时托盘图标的悬停提示：`{problem}` 是问题区第一条
@@ -151,7 +153,8 @@ pub struct TrayTexts {
 /// 镜像前端 `i18n/getInitialLanguage` 的判定顺序，确保首次安装
 /// （`settings.language` 尚未写入）时托盘语言与界面语言一致：
 /// 繁中系统（zh-TW/HK/MO/Hant）→ `zh-TW`，其余 zh → `zh`，
-/// 日文 → `ja`，英文 → `en`，未知区域回退到 `zh`（与前端默认一致）。
+/// 日文 → `ja`，土耳其文 → `tr`，英文 → `en`，其他语言回退到 `en`，
+/// 区域为空时回退到 `zh`（与前端默认一致）。
 fn map_locale_to_tray_language(locale: &str) -> &'static str {
     let locale = locale.to_lowercase();
     if locale == "zh" {
@@ -166,10 +169,12 @@ fn map_locale_to_tray_language(locale: &str) -> &'static str {
         "zh"
     } else if locale.starts_with("ja") {
         "ja"
-    } else if locale.starts_with("en") {
-        "en"
-    } else {
+    } else if locale.starts_with("tr") {
+        "tr"
+    } else if locale.is_empty() {
         "zh"
+    } else {
+        "en"
     }
 }
 
@@ -212,6 +217,7 @@ impl TrayTexts {
                 problem_attach_failed:
                     "{app}: {mode} couldn't reconnect at startup; back to direct",
                 problem_switch_failed: "{app} didn't switch: {reason}",
+                problem_api_key_var_failed: "API key variable {name} failed to refresh: {reason}",
                 problem_more: "{count} more issues — open CC Switch to see them",
                 desktop_unavailable:
                     "The routing service isn't running; {name} is unavailable for now",
@@ -245,6 +251,67 @@ impl TrayTexts {
                 date_format: "%b %-d",
                 quota_used: false,
             },
+            // 土耳其语是社区翻译：从英文起步再覆盖已翻译的项，之后新增的托盘项
+            // 在有人翻译前显示英文，而不是让所有改托盘的提交都必须补土耳其语。
+            "tr" => {
+                let mut texts = Self::from_language("en");
+                texts.show_main = "CC Switch'i aç";
+                texts.open_website = "Resmî web sitesini aç";
+                texts.lightweight_mode = "Hafif mod";
+                texts.quit = "CC Switch'ten çık";
+                texts.quit_stops_routing = "CC Switch'ten çık (yönlendirme hizmeti durur)";
+                texts.projects_label = "Projeler";
+                texts.no_project_label = "Proje yok";
+                texts.header_direct = "Doğrudan";
+                texts.header_route = "Yönlendirme";
+                texts.header_failover = "Yönlendirme · Yedek sağlayıcıya geçiş açık";
+                texts.header_stack = "Birleştirme · Varsayılan sağlayıcı";
+                texts.header_stack_default = "Birleştirme · Varsayılan: {name}";
+                texts.failover_note = "Kuyruktan otomatik seçilir; uygulama sayfasından değiştirebilirsiniz";
+                texts.mode_route = "Yönlendirme";
+                texts.mode_stack = "Birleştirme";
+                texts.mode_mapping = "Model eşleme";
+                texts.needs_routing_suffix = " (yönlendirme gerekir)…";
+                texts.official_blocked_suffix = " (resmî abonelikler yönlendirmeyi kullanmaz)";
+                texts.mapping_suffix = " · Model eşleme";
+                texts.open_app_page = "{app} sayfasını aç";
+                texts.add_provider = "Sağlayıcı ekle…";
+                texts.almost_out = "bitmek üzere";
+                texts.needs_attention = "ilgilenilmesi gerekiyor";
+                texts.problem_service_down = "Yönlendirme hizmeti çalışmıyor (port {port})";
+                texts.problem_attach_failed = "{app}: {mode} başlangıçta yeniden bağlanamadı; doğrudan bağlantıya dönüldü";
+                texts.problem_switch_failed = "{app} geçiş yapamadı: {reason}";
+                texts.problem_more = "{count} sorun daha var — görmek için CC Switch'i açın";
+                texts.desktop_unavailable = "Yönlendirme hizmeti çalışmıyor; {name} şu anda kullanılamıyor";
+                texts.tooltip_problem = "CC Switch · İlgilenilmesi gerekiyor: {problem}";
+                texts.feedback_switched = "{app}, {name} sağlayıcısına geçti. Uygulamak için {app} uygulamasını yeniden başlatın";
+                texts.feedback_stack_default = "{app} için varsayılan sağlayıcı artık {name}. Uygulamak için {app} uygulamasını yeniden başlatın";
+                texts.feedback_profile = "{name} projesi {app} uygulamasına uygulandı";
+                texts.tier_five_hour = "5 saatlik";
+                texts.tier_weekly = "Haftalık";
+                texts.tier_fable = "Fable";
+                texts.tier_monthly = "Aylık";
+                texts.tier_thirty_day = "30 günlük";
+                texts.tier_credits = "Krediler";
+                texts.tier_gemini_pro = "Pro";
+                texts.tier_gemini_flash = "Flash";
+                texts.tier_gemini_flash_lite = "Flash Lite";
+                texts.tier_premium = "Premium";
+                texts.tier_left = "{label} %{value} kaldı";
+                texts.tier_used = "{label} %{value} kullanıldı";
+                texts.tier_used_up = "{label} tükendi";
+                texts.balance = "Bakiye {value}";
+                texts.balance_used_up = "Bakiye tükendi";
+                texts.plan_expired = "Planın süresi doldu";
+                texts.used_amount = "Kullanılan: {value}";
+                texts.quota_failed = "Kota bilgisi alınamıyor";
+                texts.quota_failed_login_expired = "Kota bilgisi alınamıyor: oturumun süresi doldu";
+                texts.quota_failed_token_refresh_pending = "Kota bilgisi alınamıyor: token yenilenmesi bekleniyor";
+                texts.reset_on_date = "{label} kotası {when} tarihinde sıfırlanır";
+                texts.reset_at_time = "{label} kotası {when} saatinde sıfırlanır";
+                texts.date_format = "%d.%m";
+                texts
+            }
             "ja" => Self {
                 show_main: "CC Switch を開く",
                 open_website: "公式サイトを開く",
@@ -272,6 +339,7 @@ impl TrayTexts {
                 problem_service_down: "ルーティングサービスが動いていません（ポート {port}）",
                 problem_attach_failed: "{app}：前回の{mode}に再接続できず、直接接続に戻りました",
                 problem_switch_failed: "{app} を切り替えられませんでした：{reason}",
+                problem_api_key_var_failed: "API キー変数 {name} の更新に失敗しました：{reason}",
                 problem_more:
                     "ほかに {count} 件の問題があります。CC Switch を開いて確認してください",
                 desktop_unavailable:
@@ -333,6 +401,7 @@ impl TrayTexts {
                 problem_service_down: "路由服務沒在執行（連接埠 {port}）",
                 problem_attach_failed: "{app}：上次的{mode}沒能接上，已回到直連",
                 problem_switch_failed: "{app} 沒切換成功：{reason}",
+                problem_api_key_var_failed: "API Key 變數 {name} 重新整理失敗：{reason}",
                 problem_more: "還有 {count} 個問題，開啟 CC Switch 查看",
                 desktop_unavailable: "路由服務沒在執行，{name} 暫時無法使用",
                 tooltip_problem: "CC Switch · 需要處理：{problem}",
@@ -391,6 +460,7 @@ impl TrayTexts {
                 problem_service_down: "路由服务没在运行（端口 {port}）",
                 problem_attach_failed: "{app}：上次的{mode}没能接上，已回到直连",
                 problem_switch_failed: "{app} 没切换成功：{reason}",
+                problem_api_key_var_failed: "API Key 变量 {name} 刷新失败：{reason}",
                 problem_more: "还有 {count} 个问题，打开 CC Switch 查看",
                 desktop_unavailable: "路由服务没在运行，{name} 暂时不可用",
                 tooltip_problem: "CC Switch · 需要处理：{problem}",
@@ -1091,6 +1161,8 @@ enum TrayProblem {
     AttachFailed { app: AppType, stack: bool },
     /// 托盘里的切换没成功。
     SwitchFailed { app: AppType, reason: String },
+    /// API Key 变量自动刷新失败。
+    ApiKeyVarFailed { name: String, reason: String },
 }
 
 /// 对供应商列表排序：sort_index → created_at → name
@@ -1577,6 +1649,13 @@ fn problem_text(texts: &TrayTexts, problem: &TrayProblem) -> String {
                 ("reason", &truncate_chars(reason, MAX_REASON_CHARS)),
             ],
         ),
+        TrayProblem::ApiKeyVarFailed { name, reason } => fill(
+            texts.problem_api_key_var_failed,
+            &[
+                ("name", name),
+                ("reason", &truncate_chars(reason, MAX_REASON_CHARS)),
+            ],
+        ),
     }
 }
 
@@ -1585,6 +1664,7 @@ fn problem_id(problem: &TrayProblem) -> String {
         TrayProblem::ServiceDown { .. } => "nav:settings:routing".to_string(),
         TrayProblem::AttachFailed { app, .. } => format!("nav:app:{}:attach", app.as_str()),
         TrayProblem::SwitchFailed { app, .. } => format!("nav:app:{}:failed", app.as_str()),
+        TrayProblem::ApiKeyVarFailed { name, .. } => format!("nav:settings:apiKeyVars:{name}"),
     }
 }
 
@@ -1956,12 +2036,17 @@ fn collect_snapshots(
     let port = snapshots
         .iter()
         .any(|snapshot| snapshot.service_down)
-        .then(|| app_state.db.get_proxy_listen_sync().1);
+        .then(|| app_state.db.get_proxy_client_endpoint_sync().1);
     let visible: Vec<(AppType, bool)> = snapshots
         .iter()
         .map(|snapshot| (snapshot.app.clone(), snapshot.mode == TrayMode::Direct))
         .collect();
-    let problems = collect_problems(port, &visible);
+    let mut problems = collect_problems(port, &visible);
+    problems.extend(
+        crate::services::api_key_vars::failing_vars(&app_state.db)
+            .into_iter()
+            .map(|(name, reason)| TrayProblem::ApiKeyVarFailed { name, reason }),
+    );
     mark_attention(&mut snapshots, &problems);
     Ok((snapshots, problems))
 }
@@ -2523,9 +2608,48 @@ pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> boo
             && app_handle.try_state::<AppState>().is_some_and(|state| {
                 crate::claude_desktop_config::current_provider_uses_proxy(&state.db)
             });
+        // Do not run a refresh script for a checked, failover-locked, or
+        // route-only item. Once the click is eligible, refresh before the
+        // service writes a live config; an expired value cannot be activated.
+        let refresh_warning =
+            match provider_click_requires_switch(&app_handle, &app_type, &provider_id) {
+                Ok(false) => None,
+                Ok(true) => match tauri::async_runtime::block_on(
+                    crate::services::api_key_vars::refresh_before_switch(
+                        &app_handle,
+                        &app_type,
+                        &provider_id,
+                    ),
+                ) {
+                    Ok(warning) => warning,
+                    Err(e) => {
+                        log::error!(
+                            "托盘刷新 API Key 后无法切换{}: {e}",
+                            app_display_name(&app_type)
+                        );
+                        record_switch_failure(&app_type, e.to_string());
+                        refresh_tray_menu(&app_handle);
+                        return;
+                    }
+                },
+                Err(e) => {
+                    log::error!("托盘检查{}失败: {e}", app_display_name(&app_type));
+                    record_switch_failure(&app_type, e.to_string());
+                    refresh_tray_menu(&app_handle);
+                    return;
+                }
+            };
         match handle_provider_click(&app_handle, &app_type, &provider_id) {
             Ok(ClickOutcome::Switched { mode, name }) => {
                 clear_app_problems(&app_type);
+                // refresh_before_switch has already emitted the API-key
+                // refresh result event and refreshed the tray's problem
+                // snapshot. Keep the warning in the switch log as a useful
+                // diagnostic without turning a successful switch into a
+                // misleading switch failure.
+                if let Some(warning) = refresh_warning {
+                    log::warn!("[ApiKeyVars] 托盘切换使用尚未过期的缓存 Key: {warning}");
+                }
                 if let Some(feedback) = switch_feedback(&app_type, mode, name) {
                     record_feedback(&app_handle, feedback);
                 }
@@ -2618,6 +2742,35 @@ fn handle_provider_click(
         mode,
         name: provider.name,
     })
+}
+
+/// Mirrors the no-op and route-only decisions made by `handle_provider_click`
+/// so the caller can avoid starting a refresh script for a click that will not
+/// activate a provider. The service still re-validates this after its switch
+/// lock, which closes the race with a concurrent menu action.
+fn provider_click_requires_switch(
+    app: &tauri::AppHandle,
+    app_type: &AppType,
+    provider_id: &str,
+) -> Result<bool, AppError> {
+    let Some(app_state) = app.try_state::<AppState>() else {
+        return Ok(false);
+    };
+    let state = app_state.inner();
+    let current = crate::mode::current::provider_for(
+        &state.db,
+        app_type,
+        crate::mode::current::Purpose::InUse,
+    )?;
+    if current.as_deref() == Some(provider_id) || tray_mode(state, app_type) == TrayMode::Failover {
+        return Ok(false);
+    }
+    let provider = state
+        .db
+        .get_provider_by_id(provider_id, app_type.as_str())?
+        .ok_or_else(|| AppError::Message(format!("供应商 {provider_id} 不存在")))?;
+    Ok(!(tray_mode(state, app_type) == TrayMode::Direct
+        && provider_needs_routing(app_type, &provider)))
 }
 
 fn emit_switched(app: &tauri::AppHandle, app_type: &AppType, provider_id: &str) {
@@ -2916,6 +3069,8 @@ mod tests {
 
     #[test]
     fn locale_maps_japanese_and_english() {
+        assert_eq!(map_locale_to_tray_language("tr-TR"), "tr");
+        assert_eq!(map_locale_to_tray_language("tr"), "tr");
         assert_eq!(map_locale_to_tray_language("ja-JP"), "ja");
         assert_eq!(map_locale_to_tray_language("ja"), "ja");
         assert_eq!(map_locale_to_tray_language("en-US"), "en");
@@ -2923,15 +3078,16 @@ mod tests {
     }
 
     #[test]
-    fn locale_unknown_falls_back_to_zh() {
-        // 与前端 getInitialLanguage 的默认值保持一致。
-        for locale in ["de-DE", "fr", "ko-KR", ""] {
+    fn locale_unknown_falls_back_to_en() {
+        // 与前端 getInitialLanguage 保持一致：认不出的语言用英文，区域为空才用默认的 zh。
+        for locale in ["de-DE", "fr", "ko-KR"] {
             assert_eq!(
                 map_locale_to_tray_language(locale),
-                "zh",
-                "expected {locale} -> zh (default)"
+                "en",
+                "expected {locale} -> en"
             );
         }
+        assert_eq!(map_locale_to_tray_language(""), "zh");
     }
 
     #[test]
@@ -4050,7 +4206,7 @@ mod tests {
             quit_text(&en(), true),
             "Quit CC Switch (stops the routing service)"
         );
-        for language in ["zh", "zh-TW", "en", "ja"] {
+        for language in ["zh", "zh-TW", "en", "ja", "tr"] {
             let texts = TrayTexts::from_language(language);
             assert_ne!(texts.quit, texts.quit_stops_routing, "{language}");
             assert!(

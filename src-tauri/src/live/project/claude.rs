@@ -32,6 +32,18 @@ impl ClaudeProjection {
     /// 存量的 Bedrock API Key 行在这里转换：选了 Bedrock、顶层有 `apiKey` 时，投影成
     /// `env.AWS_BEARER_TOKEN_BEDROCK`（`env` 里已有就以它为准），行本身不改写。
     pub fn of(settings: &Value) -> Self {
+        // Key 字段里的 `{{NAME}}` 变量引用在这里换成当前值（无法解析的保持字面值，
+        // 由写入引擎拦下）
+        let resolved = crate::services::api_key_vars::resolve::resolve_settings_lossy(
+            &crate::app_config::AppType::Claude,
+            settings,
+        );
+        Self::of_raw(&resolved)
+    }
+
+    /// Project a provider row for editor display or persistence without resolving
+    /// API-key variable templates. Resolution is only for live/proxy writes.
+    pub(crate) fn of_raw(settings: &Value) -> Self {
         let mut projection = Self::default();
         if let Some(root) = settings.as_object() {
             for (key, value) in root {
@@ -199,7 +211,11 @@ fn legacy_bedrock_shape(row: &Value, projection: &ClaudeProjection) -> Option<Cl
 pub const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
 
 /// 代理契约里的稳定模型别名：客户端只看到这几个名字，真实模型由代理映射。
-const PROXY_HAIKU_ALIAS: &str = "claude-haiku-4-5";
+///
+/// Claude Code 按别名查自己的模型表决定思考参数：`claude-haiku-4-5` 被当成可关思考的旧
+/// 模型，haiku 档会发 `thinking: disabled`，强制思考的上游直接拒（#8118）。别名要跟上
+/// 当代模型。
+const PROXY_HAIKU_ALIAS: &str = "claude-haiku-5-5";
 const PROXY_SONNET_ALIAS: &str = "claude-sonnet-5";
 const PROXY_OPUS_ALIAS: &str = "claude-opus-5";
 const PROXY_FABLE_ALIAS: &str = "claude-fable-5";

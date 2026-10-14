@@ -75,7 +75,7 @@ pub(crate) async fn execute_and_format_usage_result(
 
             let msg = match err {
                 AppError::Localized { zh, en, .. } => {
-                    if lang == "en" {
+                    if lang == "en" || lang == "tr" {
                         en
                     } else {
                         zh
@@ -109,7 +109,7 @@ fn resolve_script_credentials(
     let api_key = api_key
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
+        .map(crate::services::api_key_vars::resolve::resolve_key_or_empty)
         .unwrap_or(provider_api_key);
 
     let base_url = base_url

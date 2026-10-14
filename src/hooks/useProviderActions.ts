@@ -339,6 +339,7 @@ export function useProviderActions(
             defaultValue: "用量查询配置保存失败",
           });
         toast.error(detail);
+        throw error;
       }
     },
     [activeApp, queryClient, t],
