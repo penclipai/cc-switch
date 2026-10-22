@@ -181,3 +181,37 @@ describe("UsageScriptModal", () => {
     );
   });
 });
+
+describe("UsageScriptModal official subscription hint", () => {
+  // agy 的额度靠它自己的 /usage 命令查，不读登录凭据
+  it("explains Antigravity's quota check instead of reading OAuth credentials", () => {
+    render(
+      <UsageScriptModal
+        provider={{
+          id: "agy-official",
+          name: "Google Official",
+          category: "official",
+          settingsConfig: { env: {}, config: {} },
+          meta: {
+            usage_script: {
+              enabled: true,
+              language: "javascript",
+              code: "",
+              templateType: "official_subscription",
+            },
+          },
+        }}
+        appId="agy"
+        isOpen
+        onClose={() => {}}
+        onSave={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText("usageScript.officialSubscriptionHintAgy"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("usageScript.officialSubscriptionHint"),
+    ).not.toBeInTheDocument();
+  });
+});
