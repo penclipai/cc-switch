@@ -3,7 +3,11 @@ use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+#[cfg(test)]
+#[path = "providers_tests.rs"]
+mod tests;
 
 type OmoProviderRow = (
     String,
@@ -15,6 +19,24 @@ type OmoProviderRow = (
     Option<String>,
     String,
 );
+
+/// API Key 变量写回保护：派生的客户端配置回读以数据库模板为准。
+fn guard_key_refs(
+    app_type: &str,
+    old_json: &str,
+    new: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if !old_json.contains("{{") {
+        return None;
+    }
+    let app = <crate::app_config::AppType as std::str::FromStr>::from_str(app_type).ok()?;
+    let old: serde_json::Value = serde_json::from_str(old_json).ok()?;
+    let restored = crate::services::api_key_vars::resolve::preserve_refs_from_stored_template(
+        &app, &old, new,
+    )?;
+    log::info!("[ApiKeyVars] {app_type} 供应商配置写回时保留了变量引用模板");
+    Some(restored)
+}
 
 impl Database {
     /// Detach Codex providers bound to these deleted local accounts, atomically.
@@ -107,12 +129,28 @@ impl Database {
         &self,
         app_type: &str,
     ) -> Result<IndexMap<String, Provider>, AppError> {
+        self.load_providers(app_type, false)
+    }
+
+    /// 路由只加载故障转移队列；端点一次批量读取，避免每张卡再查一次。
+    pub(super) fn load_providers(
+        &self,
+        app_type: &str,
+        failover_only: bool,
+    ) -> Result<IndexMap<String, Provider>, AppError> {
         let conn = lock_conn!(self.conn);
-        let mut stmt = conn.prepare(
+        let query = if failover_only {
+            "SELECT id, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
+             FROM providers WHERE app_type = ?1 AND in_failover_queue = 1
+             ORDER BY COALESCE(sort_index, 999999), id ASC"
+        } else {
             "SELECT id, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
              FROM providers WHERE app_type = ?1
              ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC"
-        ).map_err(|e| AppError::Database(e.to_string()))?;
+        };
+        let mut stmt = conn
+            .prepare_cached(query)
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
         let provider_iter = stmt
             .query_map(params![app_type], |row| {
@@ -157,38 +195,52 @@ impl Database {
         for provider_res in provider_iter {
             let (id, mut provider) = provider_res.map_err(|e| AppError::Database(e.to_string()))?;
             provider.id = id.clone();
-
-            let mut stmt_endpoints = conn.prepare(
-                "SELECT url, added_at FROM provider_endpoints WHERE provider_id = ?1 AND app_type = ?2 ORDER BY added_at ASC, url ASC"
-            ).map_err(|e| AppError::Database(e.to_string()))?;
-
-            let endpoints_iter = stmt_endpoints
-                .query_map(params![id, app_type], |row| {
-                    let url: String = row.get(0)?;
-                    let added_at: Option<i64> = row.get(1)?;
-                    Ok((
-                        url,
-                        crate::settings::CustomEndpoint {
-                            url: "".to_string(),
-                            added_at: added_at.unwrap_or(0),
-                            last_used: None,
-                        },
-                    ))
-                })
-                .map_err(|e| AppError::Database(e.to_string()))?;
-
-            let mut custom_endpoints = HashMap::new();
-            for ep_res in endpoints_iter {
-                let (url, mut ep) = ep_res.map_err(|e| AppError::Database(e.to_string()))?;
-                ep.url = url.clone();
-                custom_endpoints.insert(url, ep);
-            }
-
             if let Some(meta) = &mut provider.meta {
-                meta.custom_endpoints = custom_endpoints;
+                // The endpoint table is authoritative, including when it is empty.
+                meta.custom_endpoints.clear();
             }
-
             providers.insert(id, provider);
+        }
+
+        if providers.is_empty() {
+            return Ok(providers);
+        }
+
+        let mut stmt_endpoints = conn
+            .prepare_cached(
+                "SELECT e.provider_id, e.url, e.added_at
+             FROM provider_endpoints e
+             INNER JOIN providers p ON p.id = e.provider_id AND p.app_type = e.app_type
+             WHERE e.app_type = ?1 AND (?2 = 0 OR p.in_failover_queue = 1)
+             ORDER BY e.added_at ASC, e.url ASC",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let endpoints = stmt_endpoints
+            .query_map(params![app_type, failover_only], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        for endpoint in endpoints {
+            let (provider_id, url, added_at) =
+                endpoint.map_err(|e| AppError::Database(e.to_string()))?;
+            if let Some(meta) = providers
+                .get_mut(&provider_id)
+                .and_then(|provider| provider.meta.as_mut())
+            {
+                meta.custom_endpoints.insert(
+                    url.clone(),
+                    crate::settings::CustomEndpoint {
+                        url,
+                        added_at: added_at.unwrap_or(0),
+                        last_used: None,
+                    },
+                );
+            }
         }
 
         Ok(providers)
@@ -263,7 +315,73 @@ impl Database {
         }
     }
 
+    /// 只改排序：一个事务里按 id 更新 `sort_index`，不存在的行跳过。不经整行快照保存，
+    /// 和删除、编辑并发时既不会复活删掉的行，也不会盖掉别处刚存的字段。
+    pub fn update_provider_sort_indexes(
+        &self,
+        app_type: &str,
+        updates: &[(String, usize)],
+    ) -> Result<(), AppError> {
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        for (id, sort_index) in updates {
+            tx.execute(
+                "UPDATE providers SET sort_index = ?1 WHERE id = ?2 AND app_type = ?3",
+                params![sort_index, id, app_type],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    /// Save a provider reconstructed from a client config or another derived
+    /// source. If the stored row contains an API-key variable template, retain
+    /// that template instead of persisting the resolved live value.
     pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
+        self.save_provider_inner(app_type, provider, true)
+    }
+
+    /// Save an explicit edit made by the user. A literal key is intentional
+    /// here, including when it happens to equal a current or historical value
+    /// of an API-key variable, so it must be allowed to detach the reference.
+    pub fn save_provider_from_user(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        self.save_provider_inner(app_type, provider, false)
+    }
+
+    /// Restore a previously captured database row exactly. This is used after
+    /// a not-yet-published live write fails, so the current stored row must
+    /// not influence the snapshot through native-readback template recovery.
+    pub fn restore_provider_snapshot(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        self.save_provider_inner(app_type, provider, false)
+    }
+
+    /// Persist an authoritative synchronization projection. Unlike a native
+    /// client readback, the supplied settings are intentional and may detach a
+    /// stored API-key-variable template in favor of an explicit literal.
+    pub fn save_provider_from_synchronization(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        self.save_provider_inner(app_type, provider, false)
+    }
+
+    fn save_provider_inner(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        preserve_key_refs: bool,
+    ) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction()
@@ -271,20 +389,52 @@ impl Database {
 
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
         let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
+        let mut meta_json = serde_json::to_string(&meta_clone)
+            .map_err(|e| AppError::Database(format!("Failed to serialize meta: {e}")))?;
 
-        let existing: Option<(bool, bool)> = tx
+        let existing: Option<(bool, bool, String, String)> = tx
             .query_row(
-                "SELECT is_current, in_failover_queue FROM providers WHERE id = ?1 AND app_type = ?2",
+                "SELECT is_current, in_failover_queue, settings_config, meta FROM providers WHERE id = ?1 AND app_type = ?2",
                 params![provider.id, app_type],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok();
 
         let is_update = existing.is_some();
-        let (is_current, in_failover_queue) =
-            existing.unwrap_or((false, provider.in_failover_queue));
+        // 写回保护：库里是 `{{NAME}}`、新值是该变量的值（从 live 读回）时保留模板
+        let guarded = preserve_key_refs
+            .then(|| {
+                existing.as_ref().and_then(|(_, _, old, _)| {
+                    guard_key_refs(app_type, old, &provider.settings_config)
+                })
+            })
+            .flatten();
+        let settings_config = guarded.as_ref().unwrap_or(&provider.settings_config);
+        let (is_current, in_failover_queue) = match existing {
+            Some((current, queued, _, stored_meta)) => {
+                // Metadata contains HashMaps (headers/model routes), whose key
+                // order can change after every read. Keep equivalent stored JSON
+                // so the no-op UPDATE predicate does not emit a spurious change.
+                // Only parse on a byte mismatch; normal refreshes stay cheap.
+                if meta_json != stored_meta
+                    && matches!(
+                        (
+                            serde_json::from_str::<serde_json::Value>(&meta_json),
+                            serde_json::from_str::<serde_json::Value>(&stored_meta),
+                        ),
+                        (Ok(new), Ok(old)) if new == old
+                    )
+                {
+                    meta_json = stored_meta;
+                }
+                (current, queued)
+            }
+            None => (false, provider.in_failover_queue),
+        };
 
         if is_update {
+            // Native-provider list refreshes also pass through this method. An
+            // unchanged row must not dirty the database or enqueue cloud sync.
             tx.execute(
                 "UPDATE providers SET
                     name = ?1,
@@ -299,10 +449,16 @@ impl Database {
                     meta = ?10,
                     is_current = ?11,
                     in_failover_queue = ?12
-                WHERE id = ?13 AND app_type = ?14",
+                WHERE id = ?13 AND app_type = ?14
+                  AND (name IS NOT ?1 OR settings_config IS NOT ?2
+                       OR website_url IS NOT ?3 OR category IS NOT ?4
+                       OR created_at IS NOT ?5 OR sort_index IS NOT ?6
+                       OR notes IS NOT ?7 OR icon IS NOT ?8 OR icon_color IS NOT ?9
+                       OR meta IS NOT ?10 OR is_current IS NOT ?11
+                       OR in_failover_queue IS NOT ?12)",
                 params![
                     provider.name,
-                    serde_json::to_string(&provider.settings_config).map_err(|e| {
+                    serde_json::to_string(settings_config).map_err(|e| {
                         AppError::Database(format!("Failed to serialize settings_config: {e}"))
                     })?,
                     provider.website_url,
@@ -312,9 +468,7 @@ impl Database {
                     provider.notes,
                     provider.icon,
                     provider.icon_color,
-                    serde_json::to_string(&meta_clone).map_err(|e| AppError::Database(format!(
-                        "Failed to serialize meta: {e}"
-                    )))?,
+                    meta_json,
                     is_current,
                     in_failover_queue,
                     provider.id,
@@ -341,8 +495,7 @@ impl Database {
                     provider.notes,
                     provider.icon,
                     provider.icon_color,
-                    serde_json::to_string(&meta_clone)
-                        .map_err(|e| AppError::Database(format!("Failed to serialize meta: {e}")))?,
+                    meta_json,
                     is_current,
                     in_failover_queue,
                 ],
@@ -501,6 +654,18 @@ impl Database {
         settings_config: &serde_json::Value,
     ) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
+        let old: Option<String> = conn
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
+                params![provider_id, app_type],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let guarded = old
+            .as_deref()
+            .and_then(|old| guard_key_refs(app_type, old, settings_config));
+        let settings_config = guarded.as_ref().unwrap_or(settings_config);
         conn.execute(
             "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = ?3",
             params![

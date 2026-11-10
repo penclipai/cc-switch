@@ -860,31 +860,113 @@ pub fn set_provider(
     write_yaml_section_to_config_locked("custom_providers", &providers_value)
 }
 
+/// Replace a writable list provider only when it still exists. This is used by
+/// refresh propagation so an external Hermes deletion is not turned into an
+/// unintended upsert.
+pub(crate) fn replace_provider_if_present(
+    name: &str,
+    provider_config: serde_json::Value,
+) -> Result<bool, AppError> {
+    let _guard = hermes_write_lock().lock()?;
+    let config = read_hermes_config()?;
+    ensure_provider_writable(&config, name, "edit")?;
+    let mut providers: Vec<serde_yaml::Value> = config
+        .get("custom_providers")
+        .and_then(|v| v.as_sequence())
+        .cloned()
+        .unwrap_or_default();
+    let Some(existing) = providers
+        .iter_mut()
+        .find(|provider| provider.get("name").and_then(|value| value.as_str()) == Some(name))
+    else {
+        return Ok(false);
+    };
+
+    let mut normalized = provider_config;
+    sanitize_hermes_provider_keys(&mut normalized);
+    normalize_provider_models_for_write(&mut normalized);
+    let first_model_id = normalized
+        .get("models")
+        .and_then(|value| value.as_object())
+        .and_then(|models| models.keys().next())
+        .cloned();
+    let mut yaml_val: serde_yaml::Value = json_to_yaml(&normalized)?;
+    if let serde_yaml::Value::Mapping(ref mut map) = yaml_val {
+        map.insert(
+            serde_yaml::Value::String("name".to_string()),
+            serde_yaml::Value::String(name.to_string()),
+        );
+        if let Some(model_id) = first_model_id {
+            map.insert(
+                serde_yaml::Value::String("model".to_string()),
+                serde_yaml::Value::String(model_id),
+            );
+        } else {
+            map.remove(serde_yaml::Value::String("model".to_string()));
+        }
+    }
+    if let (Some(existing_map), serde_yaml::Value::Mapping(new_map)) =
+        (existing.as_mapping(), &mut yaml_val)
+    {
+        for (key, value) in existing_map {
+            new_map.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    *existing = yaml_val;
+    write_yaml_section_to_config_locked(
+        "custom_providers",
+        &serde_yaml::Value::Sequence(providers),
+    )?;
+    Ok(true)
+}
+
 /// Remove a custom provider by name.
 ///
 /// Filters out the matching entry from the `custom_providers:` sequence.
 /// No-op if the section is missing or no entry matches. The entire
 /// read-modify-write is done under the write lock to prevent TOCTOU races.
 pub fn remove_provider(name: &str) -> Result<HermesWriteOutcome, AppError> {
-    let _guard = hermes_write_lock().lock()?;
-    let config = read_hermes_config()?;
+    let removed_title_model = get_provider(name)?
+        .as_ref()
+        .and_then(declared_title_generation_model)
+        .map(String::from);
 
-    ensure_provider_writable(&config, name, "remove")?;
+    let outcome = {
+        let _guard = hermes_write_lock().lock()?;
+        let config = read_hermes_config()?;
 
-    let mut providers: Vec<serde_yaml::Value> = config
-        .get("custom_providers")
-        .and_then(|v| v.as_sequence())
-        .cloned()
-        .unwrap_or_default();
+        ensure_provider_writable(&config, name, "remove")?;
 
-    let original_len = providers.len();
-    providers.retain(|p| p.get("name").and_then(|n| n.as_str()) != Some(name));
-    if providers.len() == original_len {
-        return Ok(HermesWriteOutcome::default());
+        let mut providers: Vec<serde_yaml::Value> = config
+            .get("custom_providers")
+            .and_then(|v| v.as_sequence())
+            .cloned()
+            .unwrap_or_default();
+
+        let original_len = providers.len();
+        providers.retain(|p| p.get("name").and_then(|n| n.as_str()) != Some(name));
+        if providers.len() == original_len {
+            return Ok(HermesWriteOutcome::default());
+        }
+
+        let providers_value = serde_yaml::Value::Sequence(providers);
+        write_yaml_section_to_config_locked("custom_providers", &providers_value)?
+    };
+
+    // The deleted card may have been the only one declaring the current title
+    // pin; release it unless the active provider still wants that model.
+    if let Some(removed) = removed_title_model {
+        let wanted = get_model_config()?
+            .and_then(|m| m.provider)
+            .map(|active| get_provider(&active))
+            .transpose()?
+            .flatten();
+        let wanted = wanted.as_ref().and_then(declared_title_generation_model);
+        if let Err(e) = sync_title_generation_model(wanted, Some(&removed)) {
+            log::warn!("Failed to release Hermes auxiliary.title_generation.model: {e}");
+        }
     }
-
-    let providers_value = serde_yaml::Value::Sequence(providers);
-    write_yaml_section_to_config_locked("custom_providers", &providers_value)
+    Ok(outcome)
 }
 
 // ============================================================================
@@ -943,7 +1025,88 @@ pub fn apply_switch_defaults(
         provider: Some(provider_id.to_string()),
         ..current
     };
-    set_model_config(&merged)
+    let outcome = set_model_config(&merged)?;
+    let wanted = declared_title_generation_model(settings_config);
+    if let Err(e) = sync_title_generation_model(wanted, None) {
+        log::warn!("Failed to sync Hermes auxiliary.title_generation.model: {e}");
+    }
+    Ok(outcome)
+}
+
+/// The `title_generation_model` a provider card declares, if any.
+fn declared_title_generation_model(provider: &serde_json::Value) -> Option<&str> {
+    provider
+        .get("title_generation_model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Pin `auxiliary.title_generation.model` to `wanted` (the active provider's
+/// `title_generation_model`; e.g. MiniMax M3.1 rejects the `reasoning_effort: none`
+/// that Hermes' title request sends, so titles use a model that accepts it), or
+/// release the pin when `wanted` is `None`.
+///
+/// Only a pin CC Switch could have written is touched: the current value must be
+/// empty or equal to a value some provider card declares (or `released`, the
+/// value of a card being deleted). A title model the user picked, or a title
+/// route pointed at its own provider / endpoint, is left alone.
+fn sync_title_generation_model(
+    wanted: Option<&str>,
+    released: Option<&str>,
+) -> Result<(), AppError> {
+    let config = read_hermes_config()?;
+    let mut aux = config
+        .get("auxiliary")
+        .and_then(|v| v.as_mapping())
+        .cloned()
+        .unwrap_or_default();
+    let k_title = serde_yaml::Value::from("title_generation");
+    let mut title = aux
+        .get(&k_title)
+        .and_then(|v| v.as_mapping())
+        .cloned()
+        .unwrap_or_default();
+    let text = |key: &str| {
+        title
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    if text("provider").is_some_and(|p| p != "auto") || text("base_url").is_some() {
+        return Ok(());
+    }
+    let current = text("model");
+    let owned = |model: &str| -> Result<bool, AppError> {
+        Ok(released == Some(model)
+            || get_providers()?
+                .values()
+                .any(|p| declared_title_generation_model(p) == Some(model)))
+    };
+    let next = match (wanted, current.as_deref()) {
+        (Some(w), Some(cur)) if w == cur => return Ok(()),
+        (Some(w), None) => Some(w),
+        (Some(w), Some(cur)) if owned(cur)? => Some(w),
+        (None, Some(cur)) if owned(cur)? => None,
+        _ => return Ok(()),
+    };
+    let k_model = serde_yaml::Value::from("model");
+    match next {
+        Some(model) => {
+            title.insert(k_model, serde_yaml::Value::from(model));
+        }
+        None => {
+            title.remove(&k_model);
+        }
+    }
+    if title.is_empty() {
+        aux.remove(&k_title);
+    } else {
+        aux.insert(k_title, serde_yaml::Value::Mapping(title));
+    }
+    write_yaml_section_to_config("auxiliary", &serde_yaml::Value::Mapping(aux)).map(|_| ())
 }
 
 // ============================================================================
@@ -1180,6 +1343,30 @@ mod tests {
             None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
         }
         result
+    }
+
+    #[test]
+    #[serial]
+    fn replace_if_present_keeps_absent_config_and_list_provider_extensions() {
+        with_test_home(|| {
+            let path = get_hermes_config_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let source =
+                "custom_providers:\n  - name: one\n    api_key: old\n    future_extension: keep\n";
+            std::fs::write(&path, source).unwrap();
+            assert!(
+                !replace_provider_if_present("missing", serde_json::json!({"api_key":"new"}))
+                    .unwrap()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+            assert!(
+                replace_provider_if_present("one", serde_json::json!({"api_key":"new"})).unwrap()
+            );
+            let value = read_hermes_config().unwrap();
+            let provider = &value["custom_providers"][0];
+            assert_eq!(provider["api_key"].as_str(), Some("new"));
+            assert_eq!(provider["future_extension"].as_str(), Some("keep"));
+        });
     }
 
     // ---- sanitize_hermes_provider_keys tests ----
@@ -2007,6 +2194,118 @@ custom_providers:
     }
 
     // ---- apply_switch_defaults ----
+
+    #[test]
+    #[serial]
+    fn title_generation_model_is_pinned_and_removed_only_when_owned() {
+        with_test_home(|| {
+            let mm = serde_json::json!({
+                "base_url": "https://api.minimax.cn/v1",
+                "models": [{ "id": "MiniMax-M3.1-Flash" }, { "id": "MiniMax-M3" }],
+                "title_generation_model": "MiniMax-M3",
+            });
+            let other = serde_json::json!({ "models": [{ "id": "x" }] });
+            set_provider("minimax", mm.clone()).unwrap();
+            set_provider("other", other.clone()).unwrap();
+            let read = || {
+                read_hermes_config()
+                    .unwrap()
+                    .get("auxiliary")
+                    .and_then(|a| a.get("title_generation"))
+                    .and_then(|t| t.get("model"))
+                    .and_then(|m| m.as_str().map(String::from))
+            };
+            // user's other auxiliary settings must survive
+            write_yaml_section_to_config(
+                "auxiliary",
+                &serde_yaml::from_str(
+                    "title_generation:\n  timeout: 9\ncompression:\n  model: keep\n",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+            apply_switch_defaults("minimax", &mm).unwrap();
+            assert_eq!(read().as_deref(), Some("MiniMax-M3"));
+            apply_switch_defaults("other", &other).unwrap();
+            assert_eq!(read(), None);
+            let cfg = read_hermes_config().unwrap();
+            assert_eq!(
+                cfg["auxiliary"]["title_generation"]["timeout"].as_i64(),
+                Some(9)
+            );
+            assert_eq!(
+                cfg["auxiliary"]["compression"]["model"].as_str(),
+                Some("keep")
+            );
+
+            // a pin the user set by hand is not removed
+            apply_switch_defaults("minimax", &mm).unwrap();
+            write_yaml_section_to_config(
+                "auxiliary",
+                &serde_yaml::from_str("title_generation:\n  model: mine\n").unwrap(),
+            )
+            .unwrap();
+            apply_switch_defaults("other", &other).unwrap();
+            assert_eq!(read().as_deref(), Some("mine"));
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn title_generation_model_leaves_user_choice_and_follows_deleted_cards() {
+        with_test_home(|| {
+            let mm = serde_json::json!({
+                "models": [{ "id": "MiniMax-M3.1-Flash" }],
+                "title_generation_model": "MiniMax-M3",
+            });
+            let other = serde_json::json!({ "models": [{ "id": "x" }] });
+            set_provider("minimax", mm.clone()).unwrap();
+            set_provider("minimax_en", mm.clone()).unwrap();
+            set_provider("other", other.clone()).unwrap();
+            let title = || read_hermes_config().unwrap()["auxiliary"]["title_generation"].clone();
+            let set_title = |yaml: &str| {
+                write_yaml_section_to_config(
+                    "auxiliary",
+                    &serde_yaml::from_str(&format!("title_generation:\n{yaml}")).unwrap(),
+                )
+                .unwrap();
+            };
+
+            // a title route the user pointed at its own provider is never touched
+            set_title("  provider: openrouter\n  model: google/gemini-flash\n");
+            apply_switch_defaults("minimax", &mm).unwrap();
+            assert_eq!(title()["model"].as_str(), Some("google/gemini-flash"));
+            apply_switch_defaults("other", &other).unwrap();
+            assert_eq!(title()["model"].as_str(), Some("google/gemini-flash"));
+
+            // nor is a title model the user picked for the auto route
+            set_title("  model: my-model\n");
+            apply_switch_defaults("minimax", &mm).unwrap();
+            assert_eq!(title()["model"].as_str(), Some("my-model"));
+
+            // deleting a card that declares the pin keeps it while the active card wants it
+            set_title("  timeout: 9\n");
+            apply_switch_defaults("minimax_en", &mm).unwrap();
+            remove_provider("minimax").unwrap();
+            assert_eq!(title()["model"].as_str(), Some("MiniMax-M3"));
+            // ...and releases it once no card wants it any more
+            remove_provider("minimax_en").unwrap();
+            assert!(title()["model"].is_null());
+            assert_eq!(title()["timeout"].as_i64(), Some(9));
+
+            // a provider switched in Hermes itself leaves no pin behind on the next switch
+            set_provider("minimax", mm.clone()).unwrap();
+            apply_switch_defaults("minimax", &mm).unwrap();
+            set_model_config(&HermesModelConfig {
+                provider: Some("other".into()),
+                ..Default::default()
+            })
+            .unwrap();
+            apply_switch_defaults("other", &other).unwrap();
+            assert!(title()["model"].is_null());
+        });
+    }
 
     #[test]
     #[serial]

@@ -118,25 +118,7 @@ pub fn view(
     let live_owner = LiveOwner::read(state)?;
     let planned = plan_for_view(&state.db, &live_owner.owner(), &provider)?;
     planned.config().apply_to(&path, &mut doc)?;
-
-    // Key 在 API Key 输入框里（行的 auth），TOML 里不再重复显示。
-    let row_key = settings_config
-        .get("auth")
-        .and_then(crate::codex_config::extract_codex_auth_api_key);
-    if let Some(route) = doc
-        .get_mut("model_providers")
-        .and_then(Item::as_table_like_mut)
-        .and_then(|providers| providers.get_mut(ROUTE_ID))
-        .and_then(Item::as_table_like_mut)
-    {
-        let injected = route
-            .get("experimental_bearer_token")
-            .and_then(Item::as_str)
-            .map(str::to_string);
-        if injected.is_some() && (injected == row_key || injected.as_deref() == Some(PENDING_KEY)) {
-            route.remove("experimental_bearer_token");
-        }
-    }
+    hide_auth_key(&mut doc, &provider)?;
 
     let display = doc.to_string();
     let mut settings = settings_config
@@ -144,6 +126,24 @@ pub fn view(
         .cloned()
         .unwrap_or_else(Map::new);
     settings.insert("config".to_string(), Value::String(display.clone()));
+    // 没绑托管账号的官方卡：auth.json 框和 TOML 一样显示切过去之后盘上的样子。行里存的
+    // 登录是旧版回填的快照，Codex 轮换 token 后就对不上了；切换也不拿它覆盖同一个人的
+    // 登录（见 `codex_login::official`）。用户没改就不存回行，见 [`plan_save`]。
+    if codex_direct::is_official(&provider)
+        && super::ProviderService::managed_codex_oauth_account_id(&provider).is_none()
+    {
+        let on_disk = codex_direct::predicted_auth_file(
+            &state.db,
+            &live_owner.owner(),
+            &Target::Direct(Some(&provider)),
+        )?;
+        settings.insert(
+            "auth".to_string(),
+            on_disk
+                .filter(Value::is_object)
+                .unwrap_or_else(|| Value::Object(Map::new())),
+        );
+    }
     settings
         .entry("auth".to_string())
         .or_insert_with(|| Value::Object(Map::new()));
@@ -156,6 +156,51 @@ pub fn view(
 /// 还没填 Key 的行按「填了 Key」投影时用的占位 Key。只出现在内存里的投影中：显示前、存行
 /// 前都去掉，从不写盘。
 const PENDING_KEY: &str = "cc-switch-editor-pending-key";
+
+/// Remove the route token that the editor projection injected from `auth`.
+///
+/// The live projection resolves API-key variables, but this decision must use
+/// the original row: resolving again here could observe a newer cache value and
+/// leave the already-projected, older value in the editable TOML.
+fn hide_auth_key(doc: &mut DocumentMut, provider: &Provider) -> Result<(), AppError> {
+    let raw_key = provider
+        .settings_config
+        .get("auth")
+        .and_then(crate::codex_config::extract_codex_auth_api_key);
+    let injected_from_auth = match raw_key.as_deref() {
+        Some(raw_key) => matches!(
+            CodexProjection::of_raw(&RowInput {
+                settings: &provider.settings_config,
+                official: codex_direct::is_official(provider),
+                proxy_injected_oauth: provider.uses_proxy_injected_oauth(),
+            })?
+            .route,
+            Route::Custom { table, .. }
+                if table
+                    .get("experimental_bearer_token")
+                    .and_then(Item::as_str)
+                    == Some(raw_key)
+        ),
+        // Do not project a keyless row here: it may legitimately be rejected by
+        // the keyless-fallback safety gate, while there is no auth token to hide.
+        None => false,
+    };
+    if let Some(route) = doc
+        .get_mut("model_providers")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|providers| providers.get_mut(ROUTE_ID))
+        .and_then(Item::as_table_like_mut)
+    {
+        let pending = route
+            .get("experimental_bearer_token")
+            .and_then(Item::as_str)
+            == Some(PENDING_KEY);
+        if injected_from_auth || pending {
+            route.remove("experimental_bearer_token");
+        }
+    }
+    Ok(())
+}
 
 /// `settings` 换上占位 Key（没有 `auth` 就补一个）。
 fn with_pending_key(settings: &Value) -> Option<Value> {
@@ -206,14 +251,14 @@ fn plan_for_view(
 /// 存行不写 live。行要进 live 时（编辑直连的当前供应商、新增第一个供应商、它是代理路由那
 /// 家）写入按真实的行再投影一次，安全闸在那里拦，行跟着撤回。
 fn project_for_save(input: &RowInput<'_>) -> Result<CodexProjection, AppError> {
-    let error = match CodexProjection::of(input) {
+    let error = match CodexProjection::of_raw(input) {
         Err(error) if is_keyless_fallback(&error) => error,
         other => return other,
     };
     let Some(settings) = with_pending_key(input.settings) else {
         return Err(error);
     };
-    let mut projection = CodexProjection::of(&RowInput {
+    let mut projection = CodexProjection::of_raw(&RowInput {
         settings: &settings,
         official: input.official,
         proxy_injected_oauth: input.proxy_injected_oauth,
@@ -369,8 +414,22 @@ pub(crate) fn plan_save(
         .collect();
     let mut base_entries = entries(&base_doc, &routes);
     base_entries.extend(removed_from_live);
+    let mut row_settings = store_into_row(stored_row, edited, &projection)?;
+    // 官方卡的 auth.json 框显示的是盘上的登录（见 [`view`]）：用户没改就保留行里原来的，
+    // 否则打开再保存会把「跟随当前登录」的卡绑死到这个人、把一份马上又会过期的 token 存进行。
+    if official && edited.get("auth") == base.get("auth") {
+        if let Some(row) = row_settings.as_object_mut() {
+            row.insert(
+                "auth".to_string(),
+                stored_row
+                    .and_then(|stored| stored.get("auth"))
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Map::new())),
+            );
+        }
+    }
     Ok(CodexEditorPlan {
-        row_settings: store_into_row(stored_row, edited, &projection)?,
+        row_settings,
         edits: TomlEdits::between(&base_entries, &entries(&edited_doc, &routes), on_conflict),
     })
 }
@@ -610,6 +669,89 @@ mod tests {
         assert!(
             !text.contains("approval_policy"),
             "global settings go to live, not the row: {text}"
+        );
+    }
+
+    #[test]
+    fn saving_a_variable_reference_does_not_persist_its_resolved_token() {
+        crate::services::api_key_vars::resolve::cache_set(
+            "EDITOR_CODEX_REF",
+            true,
+            Some("sk-editor-codex"),
+        );
+        let edited = json!({
+            "auth": { "OPENAI_API_KEY": "{{EDITOR_CODEX_REF}}" },
+            "config": "model_provider = \"relay\"\n[model_providers.relay]\nname = \"Relay\"\nbase_url = \"https://relay.example/v1\"\n"
+        });
+        let plan = plan_save(
+            None,
+            &edited,
+            &edited,
+            &Origin::row(&edited).unwrap(),
+            false,
+            false,
+            ConflictPolicy::Refuse,
+        )
+        .expect("plan");
+        let text = plan.row_settings["config"].as_str().expect("config");
+        assert_eq!(
+            plan.row_settings["auth"]["OPENAI_API_KEY"],
+            "{{EDITOR_CODEX_REF}}"
+        );
+        assert!(!text.contains("experimental_bearer_token"), "{text}");
+        assert!(!text.contains("sk-editor-codex"), "{text}");
+    }
+
+    #[test]
+    fn hiding_auth_token_uses_the_raw_reference_after_a_cache_rotation() {
+        const REF: &str = "EDITOR_CODEX_TOCTOU_REF";
+        crate::services::api_key_vars::resolve::cache_set(REF, true, Some("old-dummy-token"));
+        let provider = Provider::with_id(
+            "test".into(),
+            "Test".into(),
+            json!({
+                "auth": { "OPENAI_API_KEY": format!("{{{{{REF}}}}}") },
+                "config": "model_provider = \"relay\"\n[model_providers.relay]\nname = \"Relay\"\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n"
+            }),
+            None,
+        );
+        let mut projected = doc(&format!(
+            "model_provider = \"{ROUTE_ID}\"\n[model_providers.{ROUTE_ID}]\nname = \"Relay\"\nbase_url = \"https://relay.example/v1\"\nexperimental_bearer_token = \"old-dummy-token\"\n",
+        ));
+
+        crate::services::api_key_vars::resolve::cache_set(REF, true, Some("new-dummy-token"));
+        hide_auth_key(&mut projected, &provider).expect("hide injected token");
+
+        assert!(
+            !projected.to_string().contains("old-dummy-token"),
+            "the previous resolved token must not reach the editor"
+        );
+        assert_eq!(
+            provider.settings_config["auth"]["OPENAI_API_KEY"],
+            json!(format!("{{{{{REF}}}}}"))
+        );
+    }
+
+    #[test]
+    fn hiding_auth_token_keeps_a_manual_token_for_an_env_key_route() {
+        let provider = Provider::with_id(
+            "test".into(),
+            "Test".into(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "{{EDITOR_CODEX_ENV_KEY_REF}}" },
+                "config": "model_provider = \"relay\"\n[model_providers.relay]\nname = \"Relay\"\nbase_url = \"https://relay.example/v1\"\nenv_key = \"RELAY_API_KEY\"\nexperimental_bearer_token = \"manual-dummy-token\"\n"
+            }),
+            None,
+        );
+        let mut projected = doc(&format!(
+            "model_provider = \"{ROUTE_ID}\"\n[model_providers.{ROUTE_ID}]\nname = \"Relay\"\nbase_url = \"https://relay.example/v1\"\nenv_key = \"RELAY_API_KEY\"\nexperimental_bearer_token = \"manual-dummy-token\"\n",
+        ));
+
+        hide_auth_key(&mut projected, &provider).expect("keep independent token");
+
+        assert!(
+            projected.to_string().contains("manual-dummy-token"),
+            "an env_key route owns its manual token independently of auth"
         );
     }
 

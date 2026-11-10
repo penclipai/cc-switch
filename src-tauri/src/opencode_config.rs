@@ -568,6 +568,54 @@ pub fn set_provider_with_format(
     .map(|_| ())
 }
 
+/// Replace only a declaration that still exists in the same OpenCode format.
+/// The membership check is performed under the document lock so a provider
+/// removed by OpenCode after scheduling a refresh is never recreated.
+pub(crate) fn replace_provider_if_present_with_format(
+    id: &str,
+    config: Value,
+    format: OpenCodeConfigFormat,
+) -> Result<bool, AppError> {
+    let _guard = opencode_config_lock().lock()?;
+    let path = get_opencode_config_path()?;
+    let mut document = OpenCodeDocument::load(&path)?;
+    if document.previous_contents.is_none() {
+        return Ok(false);
+    }
+    let mut desired = document.document.value().clone();
+    let key = match format {
+        OpenCodeConfigFormat::V1 => {
+            // A valid native declaration wins over a legacy declaration. Do not
+            // revive or modify the shadowed V1 source during a refresh.
+            if desired
+                .get("providers")
+                .and_then(|providers| providers.get(id))
+                .is_some_and(is_native_provider)
+            {
+                return Ok(false);
+            }
+            "provider"
+        }
+        OpenCodeConfigFormat::V2 => "providers",
+    };
+    let Some(providers) = desired.get_mut(key).and_then(Value::as_object_mut) else {
+        return Ok(false);
+    };
+    if !providers.contains_key(id) {
+        return Ok(false);
+    }
+    if format == OpenCodeConfigFormat::V2 {
+        validate_native_provider(id, &config)?;
+    }
+    providers.insert(id.to_string(), config);
+    if !document.document.apply(&desired)? {
+        // The declaration is present and already matches the refresh payload.
+        return Ok(true);
+    }
+    document.save()?;
+    Ok(true)
+}
+
 pub fn remove_provider(id: &str) -> Result<(), AppError> {
     edit_config(get_opencode_config_path, |config| {
         let removed_legacy = config
@@ -581,6 +629,31 @@ pub fn remove_provider(id: &str) -> Result<(), AppError> {
                 providers.remove(id);
             }
         }
+    })
+    .map(|_| ())
+}
+
+/// Top-level `model` (`"<provider>/<model>"`): the model OpenCode starts with.
+pub fn get_default_model() -> Result<Option<String>, AppError> {
+    Ok(read_opencode_config()?
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
+/// Only rewrites the top-level `model`; `small_model` and everything else stay as is.
+pub fn set_default_model(model: &str) -> Result<(), AppError> {
+    let model = model.trim();
+    if !model
+        .split_once('/')
+        .is_some_and(|(provider, id)| !provider.is_empty() && !id.is_empty())
+    {
+        return Err(AppError::InvalidInput(format!(
+            "OpenCode model must be \"<provider>/<model>\": {model}"
+        )));
+    }
+    edit_config(get_opencode_config_path, |config| {
+        config["model"] = json!(model);
     })
     .map(|_| ())
 }
@@ -704,6 +777,48 @@ mod tests {
         let dir = home.join(".config").join("opencode");
         std::fs::create_dir_all(&dir).expect("create config dir");
         std::fs::write(dir.join("opencode.json"), content).expect("write config");
+    }
+
+    #[test]
+    fn replace_if_present_preserves_absent_document_and_updates_matching_format() {
+        let home = tempfile::tempdir().unwrap();
+        let _guard = TestHomeGuard::set(home.path());
+        write_config(
+            home.path(),
+            r#"{"provider":{"one":{"apiKey":"old","extra":1}},"providers":{"two":{"package":"x"}}}"#,
+        );
+        let path = get_opencode_config_path().unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(!replace_provider_if_present_with_format(
+            "missing",
+            json!({"apiKey":"new"}),
+            OpenCodeConfigFormat::V1
+        )
+        .unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(replace_provider_if_present_with_format(
+            "one",
+            json!({"apiKey":"new","extra":1}),
+            OpenCodeConfigFormat::V1
+        )
+        .unwrap());
+        assert_eq!(
+            read_opencode_config().unwrap()["provider"]["one"]["apiKey"],
+            "new"
+        );
+        assert!(replace_provider_if_present_with_format(
+            "one",
+            json!({"apiKey":"new","extra":1}),
+            OpenCodeConfigFormat::V1
+        )
+        .unwrap());
+        // V1 refresh must not write a foreign V2 declaration.
+        assert!(!replace_provider_if_present_with_format(
+            "two",
+            json!({"apiKey":"new"}),
+            OpenCodeConfigFormat::V1
+        )
+        .unwrap());
     }
 
     #[test]
@@ -1115,6 +1230,36 @@ mod tests {
         assert_eq!(
             config["model"], "keep-me",
             "unrelated user config must be preserved"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn set_default_model_only_touches_top_level_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = TestHomeGuard::set(temp.path());
+
+        write_config(
+            temp.path(),
+            "{\n  // keep me\n  \"model\": \"old/a\",\n  \"small_model\": \"old/b\"\n}\n",
+        );
+        assert_eq!(get_default_model().unwrap().as_deref(), Some("old/a"));
+
+        set_default_model("relay/vendor/model-x").expect("set must succeed");
+
+        let path = get_opencode_config_path().unwrap();
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(source.contains("// keep me"), "comments must survive");
+        let config = read_opencode_config().unwrap();
+        assert_eq!(config["model"], "relay/vendor/model-x");
+        assert_eq!(config["small_model"], "old/b");
+
+        for invalid in ["", "no-slash", "/model", "provider/"] {
+            assert!(set_default_model(invalid).is_err(), "{invalid:?}");
+        }
+        assert_eq!(
+            read_opencode_config().unwrap()["model"],
+            "relay/vendor/model-x"
         );
     }
 

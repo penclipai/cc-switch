@@ -1,6 +1,7 @@
-import { Suspense, type ComponentType } from "react";
+import { Suspense, useRef, useState, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   render,
   screen,
   waitFor,
@@ -15,6 +16,7 @@ import {
   setCurrentProviderId,
   setLiveProviderIds,
   setProviders,
+  setSettings,
 } from "../msw/state";
 import { emitTauriEvent } from "../msw/tauriMocks";
 import { server } from "../msw/server";
@@ -23,6 +25,29 @@ const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
 const skillsPanelMocks = vi.hoisted(() => ({
   initialViews: [] as string[],
+}));
+const usageModalMocks = vi.hoisted(() => ({
+  closedProviderIds: [] as string[],
+}));
+const windowMocks = vi.hoisted(() => ({
+  isLinux: vi.fn(() => false),
+  isMaximized: vi.fn(),
+  isFullscreen: vi.fn(),
+  isResizable: vi.fn(),
+  scaleFactor: vi.fn(),
+  setDecorations: vi.fn(async () => {}),
+  resizeListeners: new Set<() => void>(),
+  onResized: vi.fn(),
+  onScaleChanged: vi.fn(),
+}));
+
+vi.mock("@/lib/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/platform")>()),
+  isLinux: windowMocks.isLinux,
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => windowMocks,
 }));
 
 vi.mock("sonner", () => ({
@@ -124,14 +149,41 @@ vi.mock("@/components/providers/EditProviderDialog", async () => {
 });
 
 vi.mock("@/components/UsageScriptModal", () => ({
-  default: ({ isOpen, provider, onSave, onClose }: any) =>
-    isOpen ? (
+  default: ({ isOpen, provider, onSave, onClose }: any) => {
+    const [saving, setSaving] = useState(false);
+    const savingRef = useRef(false);
+    const save = async () => {
+      if (savingRef.current) return;
+      savingRef.current = true;
+      setSaving(true);
+      try {
+        await onSave({
+          enabled: false,
+          language: "javascript",
+          code: "",
+        });
+        onClose();
+        usageModalMocks.closedProviderIds.push(provider?.id);
+      } catch {
+        // The production modal leaves the panel open after the save owner toasts.
+      } finally {
+        savingRef.current = false;
+        setSaving(false);
+      }
+    };
+
+    return isOpen ? (
       <div data-testid="usage-modal">
         <span data-testid="usage-provider">{provider?.id}</span>
-        <button onClick={() => onSave("script-code")}>save-script</button>
-        <button onClick={() => onClose()}>close-usage</button>
+        <button disabled={saving} onClick={() => void save()}>
+          save-script
+        </button>
+        <button disabled={saving} onClick={() => onClose()}>
+          close-usage
+        </button>
       </div>
-    ) : null,
+    ) : null;
+  },
 }));
 
 vi.mock("@/components/ConfirmDialog", () => ({
@@ -173,6 +225,19 @@ vi.mock("@/components/mcp/McpPanel", () => ({
     ),
 }));
 
+vi.mock("@/components/mcp/UnifiedMcpPanel", async () => {
+  const { useUnsavedChangesTracker } = await vi.importActual<
+    typeof import("@/lib/unsavedChanges")
+  >("@/lib/unsavedChanges");
+  // 当作一直开着的 MCP 编辑页：输入即登记未保存的修改
+  const Body = () => (
+    <div data-testid="mcp-editor" {...useUnsavedChangesTracker()}>
+      <input aria-label="mcp-field" />
+    </div>
+  );
+  return { default: Body };
+});
+
 /** 侧栏里的应用行（v7 侧栏取代了原来页头的应用切换器） */
 const sidebarApp = (name: string) =>
   // 首次启动提示是模态对话框，会把侧栏标成 aria-hidden，所以带上 hidden
@@ -198,6 +263,19 @@ describe("App integration with MSW", () => {
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
     skillsPanelMocks.initialViews = [];
+    usageModalMocks.closedProviderIds = [];
+    windowMocks.isLinux.mockReturnValue(false);
+    windowMocks.isMaximized.mockResolvedValue(false);
+    windowMocks.isFullscreen.mockResolvedValue(false);
+    windowMocks.isResizable.mockResolvedValue(true);
+    windowMocks.scaleFactor.mockResolvedValue(1);
+    windowMocks.resizeListeners.clear();
+    const listen = async (handler: () => void) => {
+      windowMocks.resizeListeners.add(handler);
+      return () => windowMocks.resizeListeners.delete(handler);
+    };
+    windowMocks.onResized.mockImplementation(listen);
+    windowMocks.onScaleChanged.mockImplementation(listen);
     localStorage.removeItem("cc-switch-last-view");
     localStorage.removeItem("cc-switch-last-app");
   });
@@ -220,12 +298,21 @@ describe("App integration with MSW", () => {
     );
 
     fireEvent.click(screen.getByText("usage"));
-    expect(screen.getByTestId("usage-modal")).toBeInTheDocument();
+    expect(await screen.findByTestId("usage-modal")).toBeInTheDocument();
     fireEvent.click(screen.getByText("save-script"));
-    fireEvent.click(screen.getByText("close-usage"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("usage-modal")).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        '\"usage_script\":{\"enabled\":false,\"language\":\"javascript\",\"code\":\"\"}',
+      ),
+    );
 
     fireEvent.click(screen.getByText("create"));
-    expect(screen.getByTestId("add-provider-dialog")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("add-provider-dialog"),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByText("confirm-add"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toMatch(
@@ -234,7 +321,9 @@ describe("App integration with MSW", () => {
     );
 
     fireEvent.click(screen.getByText("edit"));
-    expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("edit-provider-dialog"),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByText("confirm-edit"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toMatch(
@@ -258,6 +347,96 @@ describe("App integration with MSW", () => {
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
   }, 10_000);
+
+  it("keeps a newly opened usage modal when an earlier save finishes after navigation", async () => {
+    let releaseOldSave!: () => void;
+    let oldSaveStarted = false;
+    const oldSaveGate = new Promise<void>((resolve) => {
+      releaseOldSave = resolve;
+    });
+    server.use(
+      http.post("http://tauri.local/update_provider", async ({ request }) => {
+        const { app, provider } = (await request.json()) as {
+          app: string;
+          provider: { id: string };
+        };
+        if (app !== "codex" || provider.id !== "codex-1") return;
+
+        oldSaveStarted = true;
+        await oldSaveGate;
+        return HttpResponse.json(true);
+      }),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    fireEvent.click(sidebarApp("Codex"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list")).toHaveTextContent("codex-1"),
+    );
+    fireEvent.click(screen.getByText("usage"));
+    expect(screen.getByTestId("usage-provider")).toHaveTextContent("codex-1");
+    fireEvent.click(screen.getByText("save-script"));
+    await waitFor(() => expect(oldSaveStarted).toBe(true));
+
+    try {
+      fireEvent.click(sidebarApp("Claude Code"));
+      await waitFor(() =>
+        expect(screen.getByTestId("provider-list")).toHaveTextContent(
+          "claude-1",
+        ),
+      );
+      fireEvent.click(screen.getByText("usage"));
+      expect(screen.getByTestId("usage-provider")).toHaveTextContent(
+        "claude-1",
+      );
+
+      releaseOldSave();
+      await waitFor(() =>
+        expect(usageModalMocks.closedProviderIds).toContain("codex-1"),
+      );
+      expect(screen.getByTestId("usage-provider")).toHaveTextContent(
+        "claude-1",
+      );
+    } finally {
+      releaseOldSave();
+    }
+  });
+
+  it("refreshes the route pointer when the proxy fails over to another provider", async () => {
+    let routeProviderId = "claude-1";
+    let modeRequests = 0;
+    server.use(
+      http.post("http://tauri.local/get_app_mode", async ({ request }) => {
+        const { appType } = (await request.json()) as { appType: string };
+        if (appType !== "claude") return;
+        modeRequests += 1;
+        return HttpResponse.json({
+          mode: "route",
+          attached: true,
+          routeProviderId,
+          directProviderId: "claude-1",
+        });
+      }),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() => expect(modeRequests).toBeGreaterThan(0));
+    const before = modeRequests;
+
+    // 故障转移只改后端的路由指针，再发 provider-switched
+    routeProviderId = "claude-2";
+    emitTauriEvent("provider-switched", {
+      appType: "claude",
+      providerId: "claude-2",
+      source: "failover",
+    });
+
+    await waitFor(() => expect(modeRequests).toBeGreaterThan(before));
+  });
 
   it("resets provider view scroll when switching apps", async () => {
     const { default: App } = await import("@/App");
@@ -309,7 +488,9 @@ describe("App integration with MSW", () => {
     // 面板只盖住内容区，侧栏还能点：切应用时编辑面板必须关掉，否则 Claude 的
     // 供应商会以 appId=codex 保存进 Codex
     fireEvent.click(screen.getByText("edit"));
-    expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("edit-provider-dialog"),
+    ).toBeInTheDocument();
     fireEvent.click(sidebarApp("Codex"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
@@ -321,7 +502,7 @@ describe("App integration with MSW", () => {
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText("usage"));
-    expect(screen.getByTestId("usage-modal")).toBeInTheDocument();
+    expect(await screen.findByTestId("usage-modal")).toBeInTheDocument();
     fireEvent.click(sidebarApp("nav.usage"));
     await waitFor(() =>
       expect(screen.queryByTestId("usage-modal")).not.toBeInTheDocument(),
@@ -334,7 +515,9 @@ describe("App integration with MSW", () => {
       ),
     );
     fireEvent.click(screen.getByText("create"));
-    expect(screen.getByTestId("add-provider-dialog")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("add-provider-dialog"),
+    ).toBeInTheDocument();
     fireEvent.keyDown(window, { key: ",", metaKey: true });
     expect(await screen.findByTestId("settings-page")).toBeInTheDocument();
     expect(screen.queryByTestId("add-provider-dialog")).not.toBeInTheDocument();
@@ -370,7 +553,9 @@ describe("App integration with MSW", () => {
       "common.unsavedLeaveMessage",
     );
     fireEvent.click(screen.getByText("cancel-delete"));
-    expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("edit-provider-dialog"),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("provider-list").textContent).toContain(
       "codex-1",
     );
@@ -385,6 +570,34 @@ describe("App integration with MSW", () => {
     expect(
       screen.queryByTestId("edit-provider-dialog"),
     ).not.toBeInTheDocument();
+  }, 10_000);
+
+  it("keeps the unsaved guard when re-clicking the current page", async () => {
+    const { default: App } = await import("@/App");
+    renderApp(App);
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "claude-1",
+      ),
+    );
+
+    fireEvent.click(sidebarApp("MCP"));
+    fireEvent.input(await screen.findByLabelText("mcp-field"), {
+      target: { value: "draft" },
+    });
+
+    // 再点当前页：不离开，所以不问，也不能把未保存登记清掉
+    fireEvent.click(sidebarApp("MCP"));
+    expect(screen.queryByTestId("confirm-dialog")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("mcp-editor")).toBeInTheDocument();
+
+    // 之后真的离开时照样要问
+    fireEvent.click(sidebarApp("nav.usage"));
+    expect(await screen.findByTestId("confirm-message")).toHaveTextContent(
+      "common.unsavedLeaveMessage",
+    );
+    fireEvent.click(screen.getByText("cancel-delete"));
+    expect(await screen.findByTestId("mcp-editor")).toBeInTheDocument();
   }, 10_000);
 
   it("shows toast when auto sync fails in background", async () => {
@@ -716,6 +929,74 @@ describe("App integration with MSW", () => {
     );
   });
 
+  it("rereads Kimi's default after a removal is refused for a stale default", async () => {
+    localStorage.setItem("cc-switch-last-app", "kimi");
+    let kimiCurrent = "kimi-sub";
+    let currentRequests = 0;
+    server.use(
+      http.post("http://tauri.local/get_providers", async ({ request }) => {
+        const { app } = (await request.json()) as { app: string };
+        if (app !== "kimi") return;
+        return HttpResponse.json({
+          go: {
+            id: "go",
+            name: "OpenCode Go",
+            settingsConfig: {},
+            meta: { liveConfigManaged: true },
+          },
+          "kimi-sub": {
+            id: "kimi-sub",
+            name: "Kimi subscription",
+            settingsConfig: {},
+            meta: { liveConfigManaged: true },
+          },
+        });
+      }),
+      http.post(
+        "http://tauri.local/get_current_provider",
+        async ({ request }) => {
+          const { app } = (await request.json()) as { app: string };
+          if (app !== "kimi") return;
+          currentRequests += 1;
+          return HttpResponse.json(kimiCurrent);
+        },
+      ),
+      http.post("http://tauri.local/remove_provider_from_live_config", () =>
+        HttpResponse.json(
+          "无效输入: Select another default model in Kimi Code before removing this model or provider",
+          { status: 500 },
+        ),
+      ),
+    );
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("current-provider")).toHaveTextContent(
+        "kimi-sub",
+      ),
+    );
+    // 用户在 Kimi Code 里用 /model 换到了 OpenCode Go 的模型，页面还没重读
+    kimiCurrent = "go";
+    const requestsBeforeRemoval = currentRequests;
+    fireEvent.click(screen.getByText("remove"));
+    fireEvent.click(screen.getByText("confirm-delete"));
+
+    await waitFor(() =>
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "notifications.removeFromConfigFailed",
+        expect.objectContaining({
+          description: "kimi.error.defaultModelInUse",
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("current-provider")).toHaveTextContent("go"),
+    );
+    expect(currentRequests).toBeGreaterThan(requestsBeforeRemoval);
+  });
+
   it("warns without blocking when removing Pi's global default provider", async () => {
     localStorage.setItem("cc-switch-last-app", "pi");
     setProviders("pi", {
@@ -905,5 +1186,162 @@ describe("App integration with MSW", () => {
     expect(await screen.findByTestId("unified-skills-panel")).toHaveTextContent(
       "discover",
     );
+  });
+
+  it("shows all eight native resize cursors and restores existing inline styles", async () => {
+    windowMocks.isLinux.mockReturnValue(true);
+    setSettings({ useAppWindowControls: true });
+    const { default: App } = await import("@/App");
+    const { unmount } = renderApp(App);
+    const header = document.querySelector("header")!;
+    header.style.setProperty("cursor", "help", "important");
+    const x = window.innerWidth;
+    const y = window.innerHeight;
+
+    await waitFor(() => {
+      fireEvent.mouseMove(header, { clientX: x / 2, clientY: 1 });
+      expect(header.style.cursor).toBe("ns-resize");
+    });
+    for (const [clientX, clientY, cursor] of [
+      [x / 2, y - 1, "ns-resize"],
+      [1, y / 2, "ew-resize"],
+      [x - 1, y / 2, "ew-resize"],
+      [1, 1, "nwse-resize"],
+      [x - 1, y - 1, "nwse-resize"],
+      [x - 1, 1, "nesw-resize"],
+      [1, y - 1, "nesw-resize"],
+    ] as const) {
+      fireEvent.mouseMove(header, { clientX, clientY });
+      expect(header.style.cursor).toBe(cursor);
+      expect(header.style.getPropertyPriority("cursor")).toBe("important");
+    }
+    fireEvent.mouseMove(header, { clientX: x / 2, clientY: 30 });
+    expect(header.style.cursor).toBe("help");
+    expect(header.style.getPropertyPriority("cursor")).toBe("important");
+
+    const icon = header.querySelector("svg")!;
+    fireEvent.mouseMove(header, { clientX: x / 2, clientY: 1 });
+    fireEvent.mouseMove(icon, { clientX: x / 2, clientY: 1 });
+    expect(header.style.cursor).toBe("help");
+    expect(icon.style.cursor).toBe("ns-resize");
+    fireEvent.blur(window);
+    expect(icon.style.cursor).toBe("");
+    vi.stubGlobal("devicePixelRatio", 2);
+    windowMocks.scaleFactor.mockResolvedValue(2);
+    try {
+      await act(async () => {
+        windowMocks.resizeListeners.forEach((handler) => handler());
+      });
+      fireEvent.mouseMove(header, { clientX: x / 2, clientY: 9 });
+      expect(header.style.cursor).toBe("ns-resize");
+      fireEvent.mouseMove(header, { clientX: x / 2, clientY: 10 });
+      expect(header.style.cursor).toBe("help");
+      fireEvent.mouseMove(header, { clientX: x / 2, clientY: 1 });
+      unmount();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(header.style.cursor).toBe("help");
+  });
+
+  it("lets the top edge resize before Tauri dragging without blocking inner-header or button events", async () => {
+    windowMocks.isLinux.mockReturnValue(true);
+    setSettings({ useAppWindowControls: true });
+    const { default: App } = await import("@/App");
+    renderApp(App);
+    const header = document.querySelector("header")!;
+    await waitFor(() => {
+      fireEvent.mouseMove(header, { clientX: 500, clientY: 1 });
+      expect(header.style.cursor).toBe("ns-resize");
+    });
+
+    // Tauri's drag-region script listens during document bubbling.
+    const startDragging = vi.fn();
+    const documentMouseDown = vi.fn((event: MouseEvent) => {
+      const drag = (event.target as Element).getAttribute(
+        "data-tauri-drag-region",
+      );
+      if (
+        drag !== null &&
+        drag !== "false" &&
+        event.button === 0 &&
+        (event.detail === 1 || event.detail === 2)
+      ) {
+        startDragging();
+      }
+    });
+    document.addEventListener("mousedown", documentMouseDown);
+    try {
+      for (const detail of [1, 2]) {
+        const edgePress = new MouseEvent("mousedown", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          detail,
+          clientX: 500,
+          clientY: 1,
+        });
+        header.dispatchEvent(edgePress);
+        expect(edgePress.defaultPrevented).toBe(false);
+      }
+      expect(documentMouseDown).not.toHaveBeenCalled();
+      expect(startDragging).not.toHaveBeenCalled();
+      fireEvent.mouseDown(header, {
+        button: 0,
+        detail: 1,
+        clientX: 500,
+        clientY: 30,
+      });
+      fireEvent.mouseDown(header, { button: 2, clientX: 500, clientY: 1 });
+      fireEvent.mouseDown(header.querySelector("button")!, {
+        button: 0,
+        clientX: 500,
+        clientY: 1,
+      });
+      expect(documentMouseDown).toHaveBeenCalledTimes(3);
+      expect(startDragging).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener("mousedown", documentMouseDown);
+    }
+  });
+
+  it("clears resize hints and leaves events alone when native resizing is unavailable", async () => {
+    windowMocks.isLinux.mockReturnValue(true);
+    setSettings({ useAppWindowControls: true });
+    const { default: App } = await import("@/App");
+    renderApp(App);
+    const header = document.querySelector("header")!;
+    const moveToEdge = () =>
+      fireEvent.mouseMove(header, { clientX: 500, clientY: 1 });
+    await waitFor(() => {
+      moveToEdge();
+      expect(header.style.cursor).toBe("ns-resize");
+    });
+    const documentMouseDown = vi.fn();
+    document.addEventListener("mousedown", documentMouseDown);
+    try {
+      for (const [method, disabledValue] of [
+        [windowMocks.isMaximized, true],
+        [windowMocks.isFullscreen, true],
+        [windowMocks.isResizable, false],
+      ] as const) {
+        method.mockResolvedValue(disabledValue);
+        await act(async () => {
+          windowMocks.resizeListeners.forEach((handler) => handler());
+        });
+        moveToEdge();
+        expect(header.style.cursor).toBe("");
+        fireEvent.mouseDown(header, { button: 0, clientX: 500, clientY: 1 });
+        method.mockResolvedValue(!disabledValue);
+        await act(async () => {
+          windowMocks.resizeListeners.forEach((handler) => handler());
+        });
+        moveToEdge();
+        expect(header.style.cursor).toBe("ns-resize");
+      }
+      expect(documentMouseDown).toHaveBeenCalledTimes(3);
+    } finally {
+      document.removeEventListener("mousedown", documentMouseDown);
+    }
   });
 });

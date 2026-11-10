@@ -48,4 +48,45 @@ describe("ApiKeySection", () => {
 
     expect(container.querySelector("p")).toBeNull();
   });
+
+  it("turns off autocorrect and auto-capitalization on the key input", () => {
+    const { container } = renderSection({ value: "sk-test" });
+    const input = container.querySelector("input");
+
+    expect(input).toHaveAttribute("autocorrect", "off");
+    expect(input).toHaveAttribute("autocapitalize", "off");
+    expect(input).toHaveAttribute("spellcheck", "false");
+  });
+});
+
+describe("ApiKeySection variable references", () => {
+  it("shows the reference as plain text with a status line", () => {
+    renderSection({ value: "{{MY_KEY}}" });
+    const input = screen.getByDisplayValue("{{MY_KEY}}");
+    expect(input).toHaveAttribute("type", "text");
+    // 没有 QueryClientProvider 时变量列表为空：显示「未定义」
+    expect(screen.getByTestId("api-key-ref-status")).toHaveTextContent(
+      "apiKeyVars.ref.unknown",
+    );
+  });
+
+  it("does not show reference hints when references are not allowed", () => {
+    renderSection({ value: "{{MY_KEY}}", allowVarRef: false });
+    expect(screen.queryByTestId("api-key-ref-status")).toBeNull();
+    expect(screen.getByDisplayValue("{{MY_KEY}}")).toHaveAttribute(
+      "type",
+      "password",
+    );
+  });
+
+  it("keeps a disabled API Key input free of variable-reference UI", () => {
+    renderSection({ value: "{{MY_KEY}}", disabled: true });
+
+    expect(screen.queryByTestId("api-key-ref-status")).toBeNull();
+    expect(screen.getByDisplayValue("{{MY_KEY}}")).toBeDisabled();
+    expect(screen.getByDisplayValue("{{MY_KEY}}")).toHaveAttribute(
+      "type",
+      "password",
+    );
+  });
 });

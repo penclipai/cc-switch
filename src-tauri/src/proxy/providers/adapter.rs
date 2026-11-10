@@ -23,6 +23,15 @@ pub trait ProviderAdapter: Send + Sync {
     /// 从 Provider 配置中提取认证信息
     fn extract_auth(&self, provider: &Provider) -> Option<AuthInfo>;
 
+    /// Return the raw credential selected for this request before API-key
+    /// variable resolution.  The forwarder uses it only to associate an
+    /// unauthorized upstream response with the exact variable that supplied
+    /// the credential it sent.  Managed OAuth credentials intentionally return
+    /// `None`.
+    fn extract_selected_raw_credential(&self, _provider: &Provider) -> Option<String> {
+        None
+    }
+
     /// 构建请求 URL
     fn build_url(&self, base_url: &str, endpoint: &str) -> String;
 
