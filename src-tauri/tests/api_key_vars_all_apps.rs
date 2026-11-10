@@ -58,6 +58,7 @@ fn config(enabled: bool, script_dir: &Path) -> ApiKeyRefreshConfig {
         script_dir: script_dir.display().to_string(),
         timeout_secs: Some(5),
         lead_time_secs: None,
+        retry_count: 0,
     }
 }
 
@@ -612,6 +613,7 @@ fn unsynced_universal_reference_blocks_deletion_and_rename_keeps_derived_templat
             enabled: false,
             timeout_secs: None,
             lead_time_secs: None,
+            retry_count: 0,
         },
         Some(VAR),
     )

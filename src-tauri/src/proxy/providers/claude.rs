@@ -888,6 +888,10 @@ impl ProviderAdapter for ClaudeAdapter {
         }
     }
 
+    fn extract_selected_raw_credential(&self, provider: &Provider) -> Option<String> {
+        self.extract_key_literal(provider)
+    }
+
     fn build_url(&self, base_url: &str, endpoint: &str) -> String {
         // Codex OAuth: 所有请求统一走 /responses 端点
         if base_url == super::CHATGPT_CODEX_BASE_URL {

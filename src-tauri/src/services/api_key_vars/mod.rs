@@ -6,9 +6,11 @@
 pub mod resolve;
 pub mod runner;
 pub mod template;
+pub(crate) mod unauthorized;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -61,6 +63,7 @@ pub struct ApiKeyVarView {
     pub timeout_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lead_time_secs: Option<u64>,
+    pub retry_count: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub masked_value: Option<String>,
     pub has_value: bool,
@@ -81,6 +84,8 @@ pub struct ApiKeyVarInput {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub lead_time_secs: Option<u64>,
+    #[serde(default)]
+    pub retry_count: u8,
 }
 
 impl ApiKeyVarInput {
@@ -90,6 +95,7 @@ impl ApiKeyVarInput {
             script_dir: self.script_dir.trim().to_string(),
             timeout_secs: self.timeout_secs,
             lead_time_secs: self.lead_time_secs,
+            retry_count: self.retry_count.min(runner::MAX_RETRY_COUNT),
         }
     }
 }
@@ -217,6 +223,7 @@ fn to_view(mut rec: ApiKeyVarRecord, refs: &HashMap<String, Vec<VarReference>>) 
         script_dir: rec.config.script_dir,
         timeout_secs: rec.config.timeout_secs,
         lead_time_secs: rec.config.lead_time_secs,
+        retry_count: rec.config.retry_count,
         has_value: rec.value.is_some(),
         masked_value: rec.value.as_deref().map(mask_key),
         state: rec.state,
@@ -483,8 +490,14 @@ pub async fn reconcile_cached_values_on_startup(state: &AppState) -> Result<Vec<
 // 刷新
 // ---------------------------------------------------------------------------
 
-fn var_lock(name: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+#[derive(Default)]
+struct RefreshLock {
+    mutex: tokio::sync::Mutex<()>,
+    completed: AtomicU64,
+}
+
+fn var_lock(name: &str) -> Arc<RefreshLock> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<RefreshLock>>>> = OnceLock::new();
     let locks = LOCKS.get_or_init(Default::default);
     let mut guard = locks.lock().unwrap_or_else(|e| e.into_inner());
     guard.entry(name.to_string()).or_default().clone()
@@ -503,6 +516,71 @@ async fn execute(rec: &ApiKeyVarRecord, reason: RefreshReason) -> Result<ScriptR
     let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
     log::info!("[ApiKeyVars] {} 开始刷新（{}）", rec.name, reason.as_str());
     run_script(&rec.config, &ctx, node_setting.as_deref(), &secrets).await
+}
+
+/// Retries only one automatic refresh cycle. The regular scheduler backoff
+/// still handles later cycles. Before each retry, re-read the record so an
+/// edit, rename, deletion, or disable cannot run the stale script again.
+fn extra_attempts_for_refresh(cfg: &ApiKeyRefreshConfig, reason: RefreshReason) -> u8 {
+    match reason {
+        RefreshReason::Startup
+        | RefreshReason::Scheduled
+        | RefreshReason::Retry
+        | RefreshReason::Unauthorized => cfg.retry_count.min(runner::MAX_RETRY_COUNT),
+        _ => 0,
+    }
+}
+
+async fn execute_scheduled_with_retries(
+    state: &AppState,
+    rec: &ApiKeyVarRecord,
+    reason: RefreshReason,
+) -> Result<ScriptRun, RunFailure> {
+    execute_with_retries(state, rec, reason, || execute(rec, reason)).await
+}
+
+async fn execute_with_retries<F, Fut>(
+    state: &AppState,
+    rec: &ApiKeyVarRecord,
+    reason: RefreshReason,
+    mut execute_attempt: F,
+) -> Result<ScriptRun, RunFailure>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<ScriptRun, RunFailure>>,
+{
+    let retries = extra_attempts_for_refresh(&rec.config, reason);
+    let mut result = execute_attempt().await;
+    for attempt in 0..retries {
+        let Err(failure) = &result else {
+            break;
+        };
+        if failure.permanent {
+            break;
+        }
+        let current = match state.db.get_api_key_var(&rec.name) {
+            Ok(Some(current)) => current,
+            Ok(None) => break,
+            Err(error) => {
+                log::warn!("[ApiKeyVars] {} 重试前读取配置失败: {error}", rec.name);
+                break;
+            }
+        };
+        if current.created_at != rec.created_at
+            || current.updated_at != rec.updated_at
+            || !current.config.enabled
+        {
+            break;
+        }
+        log::warn!(
+            "[ApiKeyVars] {} 刷新失败，执行第 {}/{} 次额外重试",
+            rec.name,
+            attempt + 1,
+            retries
+        );
+        result = execute_attempt().await;
+    }
+    result
 }
 
 /// 更新引用 `name` 且已启用的供应商，逐项报告失败；不能启用仅保存在库中的供应商。
@@ -551,14 +629,24 @@ pub fn propagate(state: &AppState, name: &str) -> (Vec<VarReference>, Vec<String
     (updated, errors)
 }
 
-/// Builds the result for a refresh request that was merged into an already
-/// successful run. Re-project live configuration here as the earlier run may
-/// have persisted the value while its live write failed.
+/// Reuse the completed attempt, including a failure, when another caller waited
+/// for its lock. A successful attempt may still need to finish live projection.
 fn merged_refresh_outcome(state: &AppState, name: &str) -> Result<RefreshOutcome, AppError> {
     let rec = state
         .db
         .get_api_key_var(name)?
         .ok_or_else(|| var_not_found(name))?;
+    if rec.state.consecutive_failures > 0 {
+        return Ok(RefreshOutcome {
+            name: rec.name,
+            error: rec.state.last_error,
+            needs_attention: rec.state.needs_attention,
+            expires_at: rec.state.expires_at,
+            value_expired: rec.value.is_none()
+                || rec.state.expires_at.is_some_and(|t| t <= now_ms()),
+            ..Default::default()
+        });
+    }
     let mut outcome = RefreshOutcome {
         success: true,
         name: rec.name.clone(),
@@ -672,11 +760,11 @@ pub async fn refresh_var(
     name: &str,
     reason: RefreshReason,
 ) -> Result<RefreshOutcome, AppError> {
-    use tauri::{Emitter, Manager};
+    use tauri::Manager;
 
-    let requested_at = now_ms();
     let lock = var_lock(name);
-    let _guard = lock.lock().await;
+    let completed = lock.completed.load(Ordering::Acquire);
+    let _guard = lock.mutex.lock().await;
 
     let state = app
         .try_state::<AppState>()
@@ -685,8 +773,7 @@ pub async fn refresh_var(
         .db
         .get_api_key_var(name)?
         .ok_or_else(|| var_not_found(name))?;
-    // 合并并发请求：等锁期间已有一次成功刷新
-    if rec.state.last_success_at.is_some_and(|t| t >= requested_at) {
+    if completed != lock.completed.load(Ordering::Acquire) {
         let handle = app.clone();
         let name = name.to_string();
         return tauri::async_runtime::spawn_blocking(move || {
@@ -706,32 +793,48 @@ pub async fn refresh_var(
         ));
     }
 
-    let expected = rec.clone();
-    let result = execute(&rec, reason).await;
-    let handle = app.clone();
+    let _active = resolve::begin_refresh(name, false);
+    let outcome = run_refresh(state.inner(), rec, reason, |outcome, was_failing| {
+        notify_refresh(app, outcome, was_failing)
+    })
+    .await?;
+    lock.completed.fetch_add(1, Ordering::Release);
+    Ok(outcome)
+}
+
+async fn run_refresh(
+    state: &AppState,
+    rec: ApiKeyVarRecord,
+    reason: RefreshReason,
+    notify: impl FnOnce(&RefreshOutcome, bool),
+) -> Result<RefreshOutcome, AppError> {
+    let was_failing = rec.state.consecutive_failures > 0 || rec.state.needs_attention;
+    let result = execute_scheduled_with_retries(state, &rec, reason).await;
+    let state = state.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let state = handle
-            .try_state::<AppState>()
-            .ok_or_else(|| AppError::Message("应用状态不可用".to_string()))?;
-        commit_result_for_snapshot(state.inner(), expected, result)
+        commit_result_for_snapshot(&state, rec, result)
     })
     .await
     .map_err(|e| AppError::Message(format!("刷新任务执行失败: {e}")))??;
 
+    notify(&outcome, was_failing);
+    Ok(outcome)
+}
+
+fn notify_refresh(app: &tauri::AppHandle, outcome: &RefreshOutcome, was_failing: bool) {
+    use tauri::Emitter;
     let event = if outcome.success {
         EVENT_REFRESHED
     } else {
         EVENT_REFRESH_FAILED
     };
-    if let Err(e) = app.emit(event, &outcome) {
+    if let Err(e) = app.emit(event, outcome) {
         log::warn!("[ApiKeyVars] 发送事件失败: {e}");
     }
     // 托盘的问题区按失败变量重建（失败状态变化时）
-    let was_failing = rec.state.consecutive_failures > 0 || rec.state.needs_attention;
     if was_failing == outcome.success || !outcome.success {
         crate::tray::refresh_tray_menu(app);
     }
-    Ok(outcome)
 }
 
 /// Refresh before switching. Failures warn while the previous key is valid;
@@ -831,19 +934,56 @@ pub fn wake_scheduler() {
 
 /// 到期需要刷新的变量
 pub fn due_vars(db: &Database, now: i64) -> Vec<(String, RefreshReason)> {
-    db.list_api_key_vars()
+    let mut due: Vec<_> = db
+        .list_api_key_vars()
         .unwrap_or_default()
         .into_iter()
-        .filter(|v| needs_refresh(&v.config, &v.state, now))
-        .map(|v| {
-            let reason = if v.state.consecutive_failures > 0 {
+        .filter_map(|v| {
+            let reason = if v.config.enabled
+                && !v.state.needs_attention
+                && resolve::rejection_pending(&v.name)
+            {
+                RefreshReason::Unauthorized
+            } else if !needs_refresh(&v.config, &v.state, now) {
+                return None;
+            } else if v.state.consecutive_failures > 0 {
                 RefreshReason::Retry
             } else {
                 RefreshReason::Scheduled
             };
-            (v.name, reason)
+            Some((v.name, reason))
         })
-        .collect()
+        .collect();
+    due.sort_by_key(|(_, reason)| *reason != RefreshReason::Unauthorized);
+    due
+}
+
+/// Recheck under the same lock used by manual and switch-time refreshes. A
+/// rotation or configuration edit can invalidate work between scan and dispatch.
+async fn refresh_due_var(
+    state: &AppState,
+    name: &str,
+    reason: RefreshReason,
+    notify: impl FnOnce(&RefreshOutcome, bool),
+) -> Result<(), AppError> {
+    let lock = var_lock(name);
+    let _guard = lock.mutex.lock().await;
+    let Some(rec) = state.db.get_api_key_var(name)? else {
+        return Ok(());
+    };
+    if !rec.config.enabled || rec.state.needs_attention {
+        return Ok(());
+    }
+    let rejected_only = reason == RefreshReason::Unauthorized;
+    if !rejected_only && !needs_refresh(&rec.config, &rec.state, now_ms()) {
+        return Ok(());
+    }
+    let active = resolve::begin_refresh(name, rejected_only);
+    if !rejected_only || active.is_some() {
+        run_refresh(state, rec, reason, notify).await?;
+        lock.completed.fetch_add(1, Ordering::Release);
+    }
+    Ok(())
 }
 
 /// Fill free slots without dispatching a variable that is already running.
@@ -943,7 +1083,13 @@ pub fn start_worker(app: tauri::AppHandle) {
                     |name, reason| {
                         let handle = app.clone();
                         async move {
-                            if let Err(e) = refresh_var(&handle, &name, reason).await {
+                            let state = handle.state::<AppState>();
+                            if let Err(e) =
+                                refresh_due_var(&state, &name, reason, |outcome, was_failing| {
+                                    notify_refresh(&handle, outcome, was_failing)
+                                })
+                                .await
+                            {
                                 log::warn!("[ApiKeyVars] {name} 刷新出错: {e}");
                             }
                         }
@@ -1001,6 +1147,101 @@ mod tests {
                 None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
             }
         }
+    }
+
+    #[test]
+    fn automatic_refresh_uses_configured_extra_attempts_only() {
+        let cfg = ApiKeyRefreshConfig {
+            retry_count: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            extra_attempts_for_refresh(&cfg, RefreshReason::Scheduled),
+            2
+        );
+        assert_eq!(extra_attempts_for_refresh(&cfg, RefreshReason::Startup), 2);
+        assert_eq!(extra_attempts_for_refresh(&cfg, RefreshReason::Retry), 2);
+        assert_eq!(
+            extra_attempts_for_refresh(&cfg, RefreshReason::Unauthorized),
+            2
+        );
+        assert_eq!(extra_attempts_for_refresh(&cfg, RefreshReason::Manual), 0);
+        assert_eq!(extra_attempts_for_refresh(&cfg, RefreshReason::Switch), 0);
+        assert_eq!(extra_attempts_for_refresh(&cfg, RefreshReason::Test), 0);
+        assert_eq!(
+            extra_attempts_for_refresh(
+                &ApiKeyRefreshConfig {
+                    retry_count: 99,
+                    ..Default::default()
+                },
+                RefreshReason::Scheduled,
+            ),
+            runner::MAX_RETRY_COUNT
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_retry_stops_after_success_or_the_configured_limit() -> Result<(), AppError> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let state = AppState::new(Arc::new(Database::memory()?));
+        let config = ApiKeyRefreshConfig {
+            enabled: true,
+            retry_count: 2,
+            ..Default::default()
+        };
+        state
+            .db
+            .upsert_api_key_var(None, "RETRY_COUNT_SUCCESS", &config)?;
+        let record = state
+            .db
+            .get_api_key_var("RETRY_COUNT_SUCCESS")?
+            .expect("saved variable");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let success_calls = calls.clone();
+        let result = execute_with_retries(&state, &record, RefreshReason::Scheduled, move || {
+            let call = success_calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(if call == 0 {
+                Err(RunFailure {
+                    permanent: false,
+                    error: "temporary failure".to_string(),
+                })
+            } else {
+                Ok(ScriptRun {
+                    output: runner::RefreshOutput {
+                        api_key: "retry-success-key".to_string(),
+                        expires_at: None,
+                        refresh_after: None,
+                        message: None,
+                    },
+                    resolved_file: "index.mjs".to_string(),
+                })
+            })
+        })
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        state
+            .db
+            .upsert_api_key_var(None, "RETRY_COUNT_EXHAUSTED", &config)?;
+        let record = state
+            .db
+            .get_api_key_var("RETRY_COUNT_EXHAUSTED")?
+            .expect("saved variable");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let failure_calls = calls.clone();
+        let result = execute_with_retries(&state, &record, RefreshReason::Scheduled, move || {
+            failure_calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Err(RunFailure {
+                permanent: false,
+                error: "temporary failure".to_string(),
+            }))
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1382,6 +1623,7 @@ mod tests {
             script_dir: "/x".into(),
             timeout_secs: None,
             lead_time_secs: None,
+            retry_count: 0,
         };
         db.upsert_api_key_var(None, "DUE_T_ON", &cfg(true))?;
         db.upsert_api_key_var(None, "DUE_T_OFF", &cfg(false))?;
@@ -1409,6 +1651,7 @@ mod tests {
             script_dir: script_dir.into(),
             timeout_secs: None,
             lead_time_secs: None,
+            retry_count: 0,
         };
         let success = |value: &str| -> Result<ScriptRun, RunFailure> {
             Ok(ScriptRun {
@@ -1509,6 +1752,7 @@ process.stdout.write(JSON.stringify({ apiKey: "old-script-key" }));"#,
             script_dir: script_dir.path().display().to_string(),
             timeout_secs: Some(5),
             lead_time_secs: None,
+            retry_count: 0,
         };
         state
             .db
@@ -1530,6 +1774,7 @@ process.stdout.write(JSON.stringify({ apiKey: "old-script-key" }));"#,
             script_dir: "/new-script".into(),
             timeout_secs: None,
             lead_time_secs: None,
+            retry_count: 0,
         };
         state.db.upsert_api_key_var(
             Some("RUNNING_SCRIPT_STALE"),
@@ -1595,6 +1840,7 @@ process.stdout.write(JSON.stringify({ apiKey: "old-script-key" }));"#,
                 script_dir: String::new(),
                 timeout_secs: None,
                 lead_time_secs: None,
+                retry_count: 0,
             };
             state
                 .db

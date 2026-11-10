@@ -1172,6 +1172,10 @@ impl ProviderAdapter for CodexAdapter {
             .map(|key| AuthInfo::new(key, strategy))
     }
 
+    fn extract_selected_raw_credential(&self, provider: &Provider) -> Option<String> {
+        self.extract_key_literal(provider)
+    }
+
     fn build_url(&self, base_url: &str, endpoint: &str) -> String {
         let base_trimmed = base_url.trim_end_matches('/');
         let endpoint_trimmed = endpoint.trim_start_matches('/');

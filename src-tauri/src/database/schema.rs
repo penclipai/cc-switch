@@ -84,6 +84,7 @@ impl Database {
                 enabled INTEGER NOT NULL DEFAULT 0,
                 timeout_secs INTEGER,
                 lead_time_secs INTEGER,
+                retry_count INTEGER NOT NULL DEFAULT 0,
                 value TEXT,
                 state_json TEXT NOT NULL DEFAULT '{}',
                 sort_index INTEGER NOT NULL DEFAULT 0,
@@ -696,6 +697,17 @@ impl Database {
                             )?;
                         }
                         Self::set_user_version(conn, 24)?;
+                    }
+                    24 => {
+                        if Self::table_exists(conn, "api_key_vars")? {
+                            Self::add_column_if_missing(
+                                conn,
+                                "api_key_vars",
+                                "retry_count",
+                                "INTEGER NOT NULL DEFAULT 0",
+                            )?;
+                        }
+                        Self::set_user_version(conn, 25)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -3990,6 +4002,39 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrate_v24_to_v25_adds_api_key_retry_count_with_zero_default() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE api_key_vars (
+                name TEXT PRIMARY KEY,
+                script_dir TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 0,
+                timeout_secs INTEGER,
+                lead_time_secs INTEGER,
+                value TEXT,
+                state_json TEXT NOT NULL DEFAULT '{}',
+                sort_index INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO api_key_vars (name) VALUES ('LEGACY_RETRY_KEY');",
+        )?;
+        Database::set_user_version(&conn, 24)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        let retry_count: i64 = conn.query_row(
+            "SELECT retry_count FROM api_key_vars WHERE name = 'LEGACY_RETRY_KEY'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(retry_count, 0);
+        Ok(())
+    }
 
     #[test]
     fn migrate_v23_to_v24_preserves_existing_session_cursors() -> Result<(), AppError> {

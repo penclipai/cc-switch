@@ -151,6 +151,18 @@ impl Provider {
         &self,
         app_type: &crate::app_config::AppType,
     ) -> (String, String) {
+        let (base_url, raw_api_key) = self.usage_credential_templates(app_type);
+        let api_key = crate::services::api_key_vars::resolve::resolve_key_or_empty(&raw_api_key);
+        (base_url, api_key)
+    }
+
+    /// Returns the URL and exact stored key template selected by the per-app
+    /// fallback rules. The caller resolves the template once immediately
+    /// before its request, so it can bind any rejection to this exact field.
+    pub(crate) fn usage_credential_templates(
+        &self,
+        app_type: &crate::app_config::AppType,
+    ) -> (String, String) {
         use crate::app_config::AppType;
 
         let settings = &self.settings_config;
@@ -272,8 +284,6 @@ impl Provider {
         // Normalize like the JS-script path (extract_base_url_from_provider) so a
         // future delegation from services/provider/usage.rs is behavior-preserving
         // and `{{baseUrl}}/path` concatenation never produces a double slash.
-        // `{{NAME}}` 变量引用换成当前值（无法解析时为空，不把字面模板发出去）
-        let api_key = crate::services::api_key_vars::resolve::resolve_key_or_empty(&api_key);
         (base_url.trim_end_matches('/').to_string(), api_key)
     }
 }
@@ -1144,6 +1154,24 @@ mod tests {
                 "{provider_type}"
             );
         }
+    }
+
+    #[test]
+    fn usage_credential_source_keeps_the_selected_fallback_field() {
+        let provider = Provider::with_id(
+            "provider-1".to_string(),
+            "Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "{{SELECTED_KEY}}",
+                    "ANTHROPIC_API_KEY": "{{UNSELECTED_SAME_VALUE}}"
+                }
+            }),
+            None,
+        );
+
+        let (_, raw_key) = provider.usage_credential_templates(&AppType::Claude);
+        assert_eq!(raw_key, "{{SELECTED_KEY}}");
     }
 
     #[test]

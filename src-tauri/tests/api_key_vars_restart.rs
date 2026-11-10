@@ -45,6 +45,7 @@ fn refresh_config(script_dir: &Path) -> ApiKeyRefreshConfig {
         script_dir: script_dir.display().to_string(),
         timeout_secs: Some(5),
         lead_time_secs: None,
+        retry_count: 0,
     }
 }
 

@@ -55,6 +55,7 @@ export function ApiKeyVarDialog({
   const [enabled, setEnabled] = useState(true);
   const [timeout, setTimeoutValue] = useState("");
   const [leadMinutes, setLeadMinutes] = useState("");
+  const [retryCount, setRetryCount] = useState("0");
   const [resolved, setResolved] = useState<ResolvedScript | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
@@ -79,6 +80,7 @@ export function ApiKeyVarDialog({
         ? String(Math.round(variable.leadTimeSecs / 60))
         : "",
     );
+    setRetryCount(String(variable?.retryCount ?? 0));
     setTestResult(null);
     setTestError(null);
     setSaveError(null);
@@ -125,6 +127,7 @@ export function ApiKeyVarDialog({
 
   const renaming = Boolean(variable && trimmedName !== variable.name);
   const refCount = variable?.references.length ?? 0;
+  const retries = Number(retryCount);
 
   const buildInput = (): ApiKeyVarInput => {
     const lead = parseOptionalInt(leadMinutes);
@@ -134,12 +137,16 @@ export function ApiKeyVarDialog({
       enabled,
       timeoutSecs: parseOptionalInt(timeout),
       leadTimeSecs: lead !== undefined ? lead * 60 : undefined,
+      retryCount: retries,
     };
   };
 
   const canSave =
     Boolean(trimmedName) &&
     !nameError &&
+    Number.isInteger(retries) &&
+    retries >= 0 &&
+    retries <= 5 &&
     (!enabled || (Boolean(scriptDir.trim()) && !resolveError));
 
   const handleBrowse = async () => {
@@ -285,7 +292,7 @@ export function ApiKeyVarDialog({
               <Switch checked={enabled} onCheckedChange={setEnabled} />
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <div className="space-y-1.5">
                 <label className="block text-caption font-medium text-fg-1">
                   {t("apiKeyVars.timeout")}
@@ -307,6 +314,28 @@ export function ApiKeyVarDialog({
                   onChange={(e) => setLeadMinutes(e.target.value)}
                   placeholder="5"
                 />
+              </div>
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="api-key-var-retry-count"
+                  className="block text-caption font-medium text-fg-1"
+                >
+                  {t("apiKeyVars.retryCount")}
+                </label>
+                <Input
+                  id="api-key-var-retry-count"
+                  type="number"
+                  inputMode="numeric"
+                  step="1"
+                  min="0"
+                  max="5"
+                  value={retryCount}
+                  onChange={(e) => setRetryCount(e.target.value)}
+                  placeholder="0"
+                />
+                <p className="text-caption text-fg-2">
+                  {t("apiKeyVars.retryCountHint")}
+                </p>
               </div>
             </div>
 

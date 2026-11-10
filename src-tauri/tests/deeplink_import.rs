@@ -53,6 +53,7 @@ fn seed_available_variables(state: &AppState) {
         script_dir: String::new(),
         timeout_secs: None,
         lead_time_secs: None,
+        retry_count: 0,
     };
     for name in ["MY_KEY", "MY_USAGE_KEY", "MY_ACCESS_TOKEN"] {
         state

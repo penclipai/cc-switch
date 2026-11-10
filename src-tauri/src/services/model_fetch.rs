@@ -95,6 +95,11 @@ pub async fn fetch_models(
     api_format: Option<&str>,
     request_headers: Option<&BTreeMap<String, String>>,
 ) -> Result<Vec<FetchedModel>, String> {
+    let resolved_key = crate::services::api_key_vars::resolve::resolve_value(api_key)
+        .map_err(|error| error.to_string())?;
+    let credential_use =
+        crate::services::api_key_vars::unauthorized::CredentialUse::capture(api_key, &resolved_key);
+    let api_key = resolved_key.as_ref();
     let candidates = if api_format == Some("google-generative-ai")
         && models_url_override.is_none()
         && !is_full_url
@@ -110,6 +115,8 @@ pub async fn fetch_models(
     };
     let headers =
         build_model_fetch_headers(api_key, api_format, user_agent.as_ref(), request_headers)?;
+    let credential_use =
+        credential_use.filter(|_| !overrides_api_key_header(api_format, request_headers));
     let mut last_err: Option<String> = None;
     let mut known_secrets = vec![api_key.to_string()];
     if let Some(request_headers) = request_headers {
@@ -133,11 +140,23 @@ pub async fn fetch_models(
         };
 
         let status = response.status();
-
+        // HTTP 401 is decisive once response headers arrive. Signal before
+        // reading the body so a dropped or malformed body cannot delay a
+        // refresh of the credential that was actually sent.
+        if status == StatusCode::UNAUTHORIZED {
+            if let Some(credential) = &credential_use {
+                credential.signal();
+            }
+        }
         if status.is_success() {
-            let resp: ModelsResponse = response
-                .json()
+            let body = response
+                .bytes()
                 .await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+            if let Some(credential) = &credential_use {
+                credential.observe_json(&body);
+            }
+            let resp: ModelsResponse = serde_json::from_slice(&body)
                 .map_err(|e| format!("Failed to parse response: {e}"))?;
 
             let mut models: Vec<FetchedModel> = if let Some(data) = resp.data {
@@ -158,19 +177,15 @@ pub async fn fetch_models(
             return Ok(models);
         }
 
+        let body = response.text().await.unwrap_or_default();
+        if let Some(credential) = &credential_use {
+            credential.observe_json(body.as_bytes());
+        }
+        let body = redact_model_fetch_error_body(body, &known_secrets);
         if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
-            let body = redact_model_fetch_error_body(
-                response.text().await.unwrap_or_default(),
-                &known_secrets,
-            );
             last_err = Some(format!("HTTP {status}: {body}"));
             continue;
         }
-
-        let body = redact_model_fetch_error_body(
-            response.text().await.unwrap_or_default(),
-            &known_secrets,
-        );
         return Err(format!("HTTP {status}: {body}"));
     }
 
@@ -178,6 +193,26 @@ pub async fn fetch_models(
         "All candidates failed: {}",
         last_err.unwrap_or_else(|| "no candidates".to_string())
     ))
+}
+
+fn api_key_header(api_format: Option<&str>) -> HeaderName {
+    match api_format {
+        Some("anthropic-messages") => HeaderName::from_static("x-api-key"),
+        Some("google-generative-ai") => HeaderName::from_static("x-goog-api-key"),
+        _ => AUTHORIZATION,
+    }
+}
+
+fn overrides_api_key_header(
+    api_format: Option<&str>,
+    headers: Option<&BTreeMap<String, String>>,
+) -> bool {
+    headers.is_some_and(|headers| {
+        headers.keys().any(|name| {
+            name.trim()
+                .eq_ignore_ascii_case(api_key_header(api_format).as_str())
+        })
+    })
 }
 
 fn redact_model_fetch_error_body(body: String, known_secrets: &[String]) -> String {
@@ -202,23 +237,13 @@ fn build_model_fetch_headers(
 
     let mut headers = HeaderMap::new();
     if !api_key.is_empty() {
-        let (name, value) = match api_format {
-            Some("anthropic-messages") => (
-                HeaderName::from_static("x-api-key"),
-                HeaderValue::from_str(api_key)
-                    .map_err(|error| format!("Invalid API Key header value: {error}"))?,
-            ),
-            Some("google-generative-ai") => (
-                HeaderName::from_static("x-goog-api-key"),
-                HeaderValue::from_str(api_key)
-                    .map_err(|error| format!("Invalid API Key header value: {error}"))?,
-            ),
-            _ => (
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {api_key}"))
-                    .map_err(|error| format!("Invalid API Key header value: {error}"))?,
-            ),
-        };
+        let name = api_key_header(api_format);
+        let value = if name == AUTHORIZATION {
+            HeaderValue::from_str(&format!("Bearer {api_key}"))
+        } else {
+            HeaderValue::from_str(api_key)
+        }
+        .map_err(|error| format!("Invalid API Key header value: {error}"))?;
         headers.insert(name, value);
     }
 
@@ -363,6 +388,8 @@ fn ends_with_version_segment(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     #[test]
     fn model_fetch_headers_follow_pi_api_format() {
@@ -414,6 +441,18 @@ mod tests {
     }
 
     #[test]
+    fn model_fetch_only_marks_the_default_key_used_when_headers_do_not_override_it() {
+        assert!(!overrides_api_key_header(None, None));
+        let custom =
+            BTreeMap::from([("authorization".to_string(), "Bearer same-value".to_string())]);
+        assert!(overrides_api_key_header(None, Some(&custom)));
+        assert!(!overrides_api_key_header(
+            Some("anthropic-messages"),
+            Some(&custom)
+        ));
+    }
+
+    #[test]
     fn model_fetch_error_body_redacts_known_header_credentials() {
         let secrets = vec![
             "short".to_string(),
@@ -424,6 +463,42 @@ mod tests {
             &secrets,
         );
         assert_eq!(body, "invalid [REDACTED] / [REDACTED]");
+    }
+
+    #[tokio::test]
+    async fn loopback_unauthorized_response_keeps_the_model_fetch_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let size = stream.read(&mut request).unwrap();
+            assert!(std::str::from_utf8(&request[..size])
+                .unwrap()
+                .starts_with("GET /v1/models HTTP/1.1"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        use crate::services::api_key_vars::resolve;
+        resolve::cache_set("REJECTED_MODELS_KEY", true, Some("test-model-key"));
+        let error = fetch_models(
+            &format!("http://{address}"),
+            "{{REJECTED_MODELS_KEY}}",
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.starts_with("HTTP 401 Unauthorized:"), "{error}");
+        server.join().unwrap();
+        assert!(resolve::rejection_pending("REJECTED_MODELS_KEY"));
     }
 
     #[test]

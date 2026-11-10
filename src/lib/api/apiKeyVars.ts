@@ -27,6 +27,8 @@ export interface ApiKeyVar {
   scriptDir: string;
   timeoutSecs?: number;
   leadTimeSecs?: number;
+  /** Extra attempts after a scheduled refresh fails. */
+  retryCount?: number;
   maskedValue?: string;
   hasValue: boolean;
   state: ApiKeyVarState;
@@ -39,6 +41,7 @@ export interface ApiKeyVarInput {
   enabled: boolean;
   timeoutSecs?: number;
   leadTimeSecs?: number;
+  retryCount?: number;
 }
 
 export interface ResolvedScript {

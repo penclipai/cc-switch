@@ -5127,13 +5127,13 @@
       "contractTitle": "Script contract",
       "contractOutput": "The entry point is index.mjs, falling back to index.js. The working directory is the script directory; imports from other files are supported. On success, stdout must contain only one JSON object (up to 64 KiB) with a required apiKey without whitespace and optional expiresAt, refreshAfter and message. Send diagnostics to stderr without credentials or raw responses.",
       "contractTime": "expiresAt and refreshAfter accept ISO-8601 timestamps with a timezone (such as 2030-01-01T00:00:00Z) or Unix seconds. Do not output the milliseconds from Date.now() directly. expiresAt must be in the future.",
-      "contractSchedule": "refreshAfter takes priority; otherwise refresh at expiresAt minus the lead time, or every hour when both are absent. The default script timeout is 30 seconds and lead time is 5 minutes. Keep the HTTP request timeout shorter than the script timeout.",
+      "contractSchedule": "refreshAfter takes priority; otherwise refresh at expiresAt minus the lead time, or every hour when both are absent. The default script timeout is 30 seconds and lead time is 5 minutes. Keep the HTTP request timeout shorter than the script timeout. A provider request that returns HTTP 401 or JSON {code: 401} for this variable triggers an immediate refresh.",
       "contractExit": "Exit 0 means success. Exit 2 signals a configuration, authentication or response error requiring attention. Other nonzero codes are retried automatically. The example exits 1 for network errors, timeouts and HTTP 408/429/5xx.",
       "environmentTitle": "Environment variables provided by CC Switch",
       "environment": {
         "CC_SWITCH_CONTRACT_VERSION": "Contract version; currently 2.",
         "CC_SWITCH_VAR_NAME": "The current variable name, such as MY_KEY.",
-        "CC_SWITCH_REASON": "Execution reason: startup, scheduled, switch, manual, test or retry.",
+        "CC_SWITCH_REASON": "Execution reason: startup, scheduled, switch, manual, test, retry or unauthorized (a provider rejected the current credential).",
         "CC_SWITCH_CURRENT_EXPIRES_AT": "Optional: the current key's expiry as a UTC ISO-8601 timestamp. Absent on the first run."
       },
       "filesTitle": "Template files (identical to the ZIP)"
@@ -5184,6 +5184,8 @@
     "enable": "Auto refresh",
     "timeout": "Timeout (s, 5–300)",
     "leadTime": "Refresh early (min)",
+    "retryCount": "Automatic refresh retries (0–5)",
+    "retryCountHint": "Extra attempts after a temporary failure during a scheduled or 401-triggered refresh. Once exhausted, the scheduler waits before the next cycle.",
     "test": "Test script",
     "testSuccess": "Success: {{value}} · expires {{time}} · {{file}}",
     "securityTitle": "Allow running a local script?",

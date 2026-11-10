@@ -117,6 +117,7 @@ fn unpacked_template_runs_from_a_unicode_space_path_and_masks_the_result() {
         enabled: true,
         timeout_secs: Some(10),
         lead_time_secs: None,
+        retry_count: 0,
     };
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()

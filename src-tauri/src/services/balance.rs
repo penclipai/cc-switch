@@ -11,6 +11,7 @@
 //!   立即透出错误文案。判定按 reqwest 错误种类在折叠点完成，不依赖错误文案匹配。
 
 use crate::provider::{UsageData, UsageResult};
+use crate::services::api_key_vars::unauthorized::native_usage;
 use std::time::Duration;
 
 // ── 供应商检测 ──────────────────────────────────────────────
@@ -89,11 +90,16 @@ async fn query_deepseek(api_key: &str) -> Result<UsageResult, String> {
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(make_auth_error(status));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -107,6 +113,7 @@ async fn query_deepseek(api_key: &str) -> Result<UsageResult, String> {
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+    native_usage::json(&body);
 
     Ok(parse_deepseek_balance(&body))
 }
@@ -171,11 +178,16 @@ async fn query_stepfun(api_key: &str) -> Result<UsageResult, String> {
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(make_auth_error(status));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -189,6 +201,7 @@ async fn query_stepfun(api_key: &str) -> Result<UsageResult, String> {
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+    native_usage::json(&body);
 
     let balance = parse_f64_field(&body, "balance").unwrap_or(0.0);
 
@@ -236,11 +249,16 @@ async fn query_siliconflow(api_key: &str, is_cn: bool) -> Result<UsageResult, St
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(make_auth_error(status));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -254,6 +272,7 @@ async fn query_siliconflow(api_key: &str, is_cn: bool) -> Result<UsageResult, St
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+    native_usage::json(&body);
 
     let data = match body.get("data") {
         Some(d) => d,
@@ -307,11 +326,16 @@ async fn query_openrouter(api_key: &str) -> Result<UsageResult, String> {
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(make_auth_error(status));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -325,6 +349,7 @@ async fn query_openrouter(api_key: &str) -> Result<UsageResult, String> {
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+    native_usage::json(&body);
 
     Ok(parse_openrouter_balance(&body))
 }
@@ -383,11 +408,16 @@ async fn query_novita(api_key: &str) -> Result<UsageResult, String> {
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(make_auth_error(status));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -401,6 +431,7 @@ async fn query_novita(api_key: &str) -> Result<UsageResult, String> {
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+    native_usage::json(&body);
 
     Ok(parse_novita_balance(&body))
 }
@@ -472,11 +503,16 @@ pub(crate) async fn query_zhipu_balance(
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(make_auth_error(status));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -490,6 +526,7 @@ pub(crate) async fn query_zhipu_balance(
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+    native_usage::json(&body);
 
     Ok(parse_zhipu_balance(&body, is_cn))
 }
@@ -575,7 +612,35 @@ pub async fn get_balance(base_url: &str, api_key: &str) -> Result<UsageResult, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::api_key_vars::{resolve, unauthorized::CredentialUse};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn native_observer_accepts_only_http_401_or_top_level_code_401() {
+        const NAME: &str = "BALANCE_REJECTION_TEST";
+        const TEMPLATE: &str = "{{BALANCE_REJECTION_TEST}}";
+        resolve::cache_set(NAME, true, Some("sent-key"));
+        let credential = CredentialUse::capture(TEMPLATE, "sent-key").unwrap();
+
+        native_usage::scope(Some(credential.clone()), async {
+            native_usage::status(reqwest::StatusCode::FORBIDDEN);
+            native_usage::json(&json!({"error": {"code": 401}}));
+            // A 403 envelope without top-level code 401 stays rejected by the
+            // original endpoint but cannot rotate this dynamic key.
+            native_usage::bytes(br#"{"code":403,"message":"forbidden"}"#);
+        })
+        .await;
+        assert!(!resolve::rejection_pending(NAME));
+
+        native_usage::scope(Some(credential), async {
+            // This is the body observation used by a non-success HTTP 500
+            // path after its response is already read for the existing error.
+            native_usage::bytes(br#"{"code":"401","message":"expired"}"#);
+        })
+        .await;
+        assert!(resolve::rejection_pending(NAME));
+        resolve::cache_set(NAME, false, Some("sent-key"));
+    }
 
     #[test]
     fn openrouter_balance_does_not_determine_key_validity() {

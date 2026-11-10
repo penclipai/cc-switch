@@ -231,4 +231,98 @@ describe("API Key variable template UI and IPC", () => {
     expect(screen.getByPlaceholderText("MY_KEY")).toHaveValue("EXAMPLE_KEY");
     expect(previewCalls).toBe(1);
   });
+
+  it("validates and saves the configured scheduled retry count", async () => {
+    let savedInput: Record<string, unknown> | undefined;
+    server.use(
+      http.post("http://tauri.local/resolve_api_key_var_script", () =>
+        HttpResponse.json({
+          dir: "C:/scripts/refresh",
+          path: "C:/scripts/refresh/index.mjs",
+          file: "index.mjs",
+          ignoredIndexJs: false,
+        }),
+      ),
+      http.post(
+        "http://tauri.local/upsert_api_key_var",
+        async ({ request }) => {
+          savedInput = (
+            (await request.json()) as { input: Record<string, unknown> }
+          ).input;
+          return HttpResponse.json({
+            name: "MY_KEY",
+            enabled: true,
+            scriptDir: "C:/scripts/refresh",
+            hasValue: false,
+            state: { consecutiveFailures: 0, needsAttention: false },
+            references: [],
+          });
+        },
+      ),
+      http.post("http://tauri.local/refresh_api_key_var", () =>
+        HttpResponse.json({
+          success: true,
+          name: "MY_KEY",
+          needsAttention: false,
+          valueExpired: false,
+          updatedProviders: [],
+          liveErrors: [],
+        }),
+      ),
+    );
+    const { user } = renderSection();
+    await user.click(screen.getByRole("button", { name: "apiKeyVars.add" }));
+    await user.type(screen.getByPlaceholderText("MY_KEY"), "MY_KEY");
+    await user.type(
+      screen.getByPlaceholderText("apiKeyVars.scriptDirPlaceholder"),
+      "C:/scripts/refresh",
+    );
+    const retries = screen.getByLabelText("apiKeyVars.retryCount");
+    await user.clear(retries);
+    await user.type(retries, "6");
+    expect(screen.getByRole("button", { name: "common.save" })).toBeDisabled();
+    await user.clear(retries);
+    await user.type(retries, "3");
+    await user.click(screen.getByRole("button", { name: "common.save" }));
+    await user.click(
+      screen.getByRole("button", { name: "apiKeyVars.securityConfirm" }),
+    );
+
+    await waitFor(() =>
+      expect(savedInput).toMatchObject({
+        name: "MY_KEY",
+        retryCount: 3,
+      }),
+    );
+  });
+
+  it("shows zero scheduled retries when editing a legacy variable", async () => {
+    server.use(
+      http.post("http://tauri.local/list_api_key_vars", () =>
+        HttpResponse.json([
+          {
+            name: "LEGACY_KEY",
+            enabled: true,
+            scriptDir: "C:/scripts/refresh",
+            hasValue: true,
+            state: { consecutiveFailures: 0, needsAttention: false },
+            references: [],
+          },
+        ]),
+      ),
+      http.post("http://tauri.local/resolve_api_key_var_script", () =>
+        HttpResponse.json({
+          dir: "C:/scripts/refresh",
+          path: "C:/scripts/refresh/index.mjs",
+          file: "index.mjs",
+          ignoredIndexJs: false,
+        }),
+      ),
+    );
+    const { user } = renderSection();
+    await user.click(
+      await screen.findByRole("button", { name: "common.edit" }),
+    );
+    expect(screen.getByLabelText("apiKeyVars.retryCount")).toHaveValue(0);
+  });
 });

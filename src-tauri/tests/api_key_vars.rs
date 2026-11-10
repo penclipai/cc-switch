@@ -28,6 +28,7 @@ fn cfg(enabled: bool) -> ApiKeyRefreshConfig {
         script_dir: String::new(),
         timeout_secs: None,
         lead_time_secs: None,
+        retry_count: 0,
     }
 }
 
@@ -67,6 +68,7 @@ fn run_node_script(
         script_dir: dir.display().to_string(),
         timeout_secs: Some(timeout_secs),
         lead_time_secs: None,
+        retry_count: 0,
     };
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -241,6 +243,7 @@ fn claude_switch_resolves_ref_and_keeps_template_in_db() {
             enabled: false,
             timeout_secs: None,
             lead_time_secs: None,
+            retry_count: 0,
         },
         Some("IT_CLAUDE_KEY"),
     )
@@ -415,6 +418,7 @@ fn real_node_refresh_updates_shared_live_configs_and_retries_same_value_after_li
                 script_dir: script_dir.path().display().to_string(),
                 timeout_secs: Some(5),
                 lead_time_secs: None,
+                retry_count: 0,
             },
         )
         .expect("variable");

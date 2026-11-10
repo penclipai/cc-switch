@@ -12,17 +12,24 @@ pub async fn get_coding_plan_quota(
     team_organization_id: Option<String>,
     team_project_id: Option<String>,
 ) -> Result<SubscriptionQuota, String> {
-    let api_key = crate::services::api_key_vars::resolve::resolve_value(&api_key)
+    let resolved_api_key = crate::services::api_key_vars::resolve::resolve_value(&api_key)
         .map_err(|e| e.to_string())?
         .into_owned();
-    crate::services::coding_plan::get_coding_plan_quota(
-        &base_url,
+    let credential_use = crate::services::api_key_vars::unauthorized::CredentialUse::capture(
         &api_key,
-        access_key_id.as_deref(),
-        secret_access_key.as_deref(),
-        coding_plan_provider.as_deref(),
-        team_organization_id.as_deref(),
-        team_project_id.as_deref(),
+        &resolved_api_key,
+    );
+    crate::services::api_key_vars::unauthorized::native_usage::scope(
+        credential_use,
+        crate::services::coding_plan::get_coding_plan_quota(
+            &base_url,
+            &resolved_api_key,
+            access_key_id.as_deref(),
+            secret_access_key.as_deref(),
+            coding_plan_provider.as_deref(),
+            team_organization_id.as_deref(),
+            team_project_id.as_deref(),
+        ),
     )
     .await
 }

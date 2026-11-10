@@ -63,7 +63,7 @@ CC Switch supplies these environment variables:
 
 - `CC_SWITCH_CONTRACT_VERSION=2`
 - `CC_SWITCH_VAR_NAME` — variable being refreshed
-- `CC_SWITCH_REASON` — `startup`, `scheduled`, `switch`, `manual`, `test`, or `retry`
+- `CC_SWITCH_REASON` — `startup`, `scheduled`, `switch`, `manual`, `test`, `retry`, or `unauthorized`. CC Switch uses `unauthorized` when a provider rejects this variable's key with HTTP 401 or a top-level JSON `code` of 401.
 - `CC_SWITCH_CURRENT_EXPIRES_AT` — optional current expiry as an ISO-8601 UTC timestamp
 
 Exit with `2` for configuration, authentication, or invalid-response problems that require attention. Exit with `1` for network, timeout, HTTP 408/429, or 5xx failures so CC Switch retries with backoff. The supplied files implement these rules.

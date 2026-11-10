@@ -34,7 +34,12 @@ pub struct ApiKeyRefreshConfig {
     /// 在过期前多少秒刷新（默认 300）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead_time_secs: Option<u64>,
+    /// Extra attempts after the first script run in one refresh cycle.
+    #[serde(default)]
+    pub retry_count: u8,
 }
+
+pub const MAX_RETRY_COUNT: u8 = 5;
 
 /// 变量的刷新运行状态（时间均为 Unix 毫秒）
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -93,6 +98,7 @@ const SCRIPT_CANDIDATES: [&str; 2] = ["index.mjs", "index.js"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshReason {
+    Unauthorized,
     Startup,
     Scheduled,
     Switch,
@@ -104,6 +110,7 @@ pub enum RefreshReason {
 impl RefreshReason {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Unauthorized => "unauthorized",
             Self::Startup => "startup",
             Self::Scheduled => "scheduled",
             Self::Switch => "switch",
@@ -1032,6 +1039,7 @@ mod tests {
             script_dir: String::new(),
             timeout_secs: None,
             lead_time_secs: None,
+            retry_count: 0,
         }
     }
 
@@ -1546,6 +1554,7 @@ mod tests {
             // can take several seconds on a cold Windows CI runner.
             timeout_secs: None,
             lead_time_secs: None,
+            retry_count: 0,
         }
     }
 

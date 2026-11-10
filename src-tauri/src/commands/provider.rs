@@ -630,15 +630,14 @@ pub async fn queryProviderUsage(
     inner
 }
 
-/// Resolve `(base_url, api_key)` for native usage queries, delegating to the
-/// per-app resolver on `Provider`. Missing provider → empty credentials.
-fn resolve_native_credentials(app_type: &AppType, provider: Option<&Provider>) -> (String, String) {
+/// Select the raw URL/key templates for a native usage query.
+fn resolve_native_templates(app_type: &AppType, provider: Option<&Provider>) -> (String, String) {
     provider
-        .map(|p| p.resolve_usage_credentials(app_type))
+        .map(|p| p.usage_credential_templates(app_type))
         .unwrap_or_default()
 }
 
-fn resolve_coding_plan_credentials(
+fn resolve_coding_plan_templates(
     app_type: &AppType,
     provider: Option<&Provider>,
     usage_script: Option<&crate::provider::UsageScript>,
@@ -649,7 +648,7 @@ fn resolve_coding_plan_credentials(
         .unwrap_or(false);
 
     if !is_zenmux {
-        return resolve_native_credentials(app_type, provider);
+        return resolve_native_templates(app_type, provider);
     }
 
     let script_base_url = usage_script
@@ -666,7 +665,7 @@ fn resolve_coding_plan_credentials(
         return (script_base_url, script_api_key);
     }
 
-    let native = resolve_native_credentials(app_type, provider);
+    let native = resolve_native_templates(app_type, provider);
     if !native.0.is_empty() && !native.1.is_empty() {
         native
     } else {
@@ -732,8 +731,13 @@ async fn query_provider_usage_inner(
 
     // ── Coding Plan 专用路径 ──
     if template_type == TEMPLATE_TYPE_TOKEN_PLAN {
-        let (base_url, api_key) =
-            resolve_coding_plan_credentials(&app_type, provider, usage_script);
+        let (base_url, raw_api_key) =
+            resolve_coding_plan_templates(&app_type, provider, usage_script);
+        let api_key = crate::services::api_key_vars::resolve::resolve_key_or_empty(&raw_api_key);
+        let credential_use = crate::services::api_key_vars::unauthorized::CredentialUse::capture(
+            &raw_api_key,
+            &api_key,
+        );
 
         // 火山方舟用账号 AK/SK 签名查询用量（存于 usage_script，与推理 api_key 分离）；
         // 其他供应商为 None，service 层沿用 api_key。
@@ -745,14 +749,17 @@ async fn query_provider_usage_inner(
         let team_organization_id = usage_script.and_then(|s| s.team_organization_id.clone());
         let team_project_id = usage_script.and_then(|s| s.team_project_id.clone());
 
-        let outcome = crate::services::coding_plan::query_coding_plan(
-            &base_url,
-            &api_key,
-            access_key_id.as_deref(),
-            secret_access_key.as_deref(),
-            coding_plan_provider.as_deref(),
-            team_organization_id.as_deref(),
-            team_project_id.as_deref(),
+        let outcome = crate::services::api_key_vars::unauthorized::native_usage::scope(
+            credential_use.clone(),
+            crate::services::coding_plan::query_coding_plan(
+                &base_url,
+                &api_key,
+                access_key_id.as_deref(),
+                secret_access_key.as_deref(),
+                coding_plan_provider.as_deref(),
+                team_organization_id.as_deref(),
+                team_project_id.as_deref(),
+            ),
         )
         .await
         .map_err(|e| format!("Failed to query coding plan: {e}"))?;
@@ -762,9 +769,13 @@ async fn query_provider_usage_inner(
         let quota = match outcome {
             crate::services::coding_plan::CodingPlanOutcome::Quota(quota) => quota,
             crate::services::coding_plan::CodingPlanOutcome::ZhipuNoPlan(_) => {
-                return crate::services::balance::query_zhipu_balance(&base_url, &api_key)
-                    .await
-                    .map_err(|e| format!("Failed to query balance: {e}"));
+                let balance = crate::services::api_key_vars::unauthorized::native_usage::scope(
+                    credential_use,
+                    crate::services::balance::query_zhipu_balance(&base_url, &api_key),
+                )
+                .await
+                .map_err(|e| format!("Failed to query balance: {e}"))?;
+                return Ok(balance);
             }
         };
 
@@ -840,11 +851,20 @@ async fn query_provider_usage_inner(
     // ── 官方余额查询路径 ──
     if template_type == TEMPLATE_TYPE_BALANCE {
         // 按 app 区分的凭据存储格式提取 Base URL 与 API Key
-        let (base_url, api_key) = resolve_native_credentials(&app_type, provider);
+        let (base_url, raw_api_key) = resolve_native_templates(&app_type, provider);
+        let api_key = crate::services::api_key_vars::resolve::resolve_key_or_empty(&raw_api_key);
+        let credential_use = crate::services::api_key_vars::unauthorized::CredentialUse::capture(
+            &raw_api_key,
+            &api_key,
+        );
 
-        return crate::services::balance::get_balance(&base_url, &api_key)
-            .await
-            .map_err(|e| format!("Failed to query balance: {e}"));
+        let balance = crate::services::api_key_vars::unauthorized::native_usage::scope(
+            credential_use,
+            crate::services::balance::get_balance(&base_url, &api_key),
+        )
+        .await
+        .map_err(|e| format!("Failed to query balance: {e}"))?;
+        return Ok(balance);
     }
 
     // ── 官方订阅额度查询路径 ──
@@ -1381,7 +1401,7 @@ mod import_claude_desktop_tests {
 
 #[cfg(test)]
 mod native_query_credentials_tests {
-    use super::{resolve_coding_plan_credentials, resolve_native_credentials};
+    use super::{resolve_coding_plan_templates, resolve_native_templates};
     use crate::app_config::AppType;
     use crate::provider::{Provider, UsageScript};
     use serde_json::json;
@@ -1423,14 +1443,14 @@ mod native_query_credentials_tests {
             }),
             None,
         );
-        let (base_url, api_key) = resolve_native_credentials(&AppType::Codex, Some(&provider));
+        let (base_url, api_key) = resolve_native_templates(&AppType::Codex, Some(&provider));
         assert_eq!(base_url, "https://api.deepseek.com");
         assert_eq!(api_key, "sk-codex");
     }
 
     #[test]
     fn missing_provider_yields_empty() {
-        let (base_url, api_key) = resolve_native_credentials(&AppType::Codex, None);
+        let (base_url, api_key) = resolve_native_templates(&AppType::Codex, None);
         assert!(base_url.is_empty());
         assert!(api_key.is_empty());
     }
@@ -1455,10 +1475,42 @@ mod native_query_credentials_tests {
         );
 
         let (base_url, api_key) =
-            resolve_coding_plan_credentials(&AppType::Claude, Some(&provider), Some(&script));
+            resolve_coding_plan_templates(&AppType::Claude, Some(&provider), Some(&script));
 
         assert_eq!(base_url, "https://script.zenmux.example/api/usage");
         assert_eq!(api_key, "sk-script");
+    }
+
+    #[test]
+    fn zenmux_explicit_variable_key_is_resolved_and_captured_from_the_script_field() {
+        crate::services::api_key_vars::resolve::cache_set(
+            "ZENMUX_USAGE_KEY",
+            true,
+            Some("sk-rotated"),
+        );
+        let provider = Provider::with_id(
+            "test".to_string(),
+            "Test".to_string(),
+            json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "sk-provider" } }),
+            None,
+        );
+        let script = usage_script(
+            Some("zenmux"),
+            Some("https://script.zenmux.example/api/usage"),
+            Some("{{ZENMUX_USAGE_KEY}}"),
+        );
+
+        let (base_url, raw_key) =
+            resolve_coding_plan_templates(&AppType::Claude, Some(&provider), Some(&script));
+        let sent_key = crate::services::api_key_vars::resolve::resolve_key_or_empty(&raw_key);
+        let credential = crate::services::api_key_vars::unauthorized::CredentialUse::capture(
+            &raw_key, &sent_key,
+        );
+
+        assert_eq!(base_url, "https://script.zenmux.example/api/usage");
+        assert_eq!(raw_key, "{{ZENMUX_USAGE_KEY}}");
+        assert_eq!(sent_key, "sk-rotated");
+        assert!(credential.is_some());
     }
 
     #[test]
@@ -1477,7 +1529,7 @@ mod native_query_credentials_tests {
         let script = usage_script(Some("zenmux"), Some("https://script.zenmux.example"), None);
 
         let (base_url, api_key) =
-            resolve_coding_plan_credentials(&AppType::Claude, Some(&provider), Some(&script));
+            resolve_coding_plan_templates(&AppType::Claude, Some(&provider), Some(&script));
 
         assert_eq!(base_url, "https://provider.zenmux.example/v1");
         assert_eq!(api_key, "sk-provider");

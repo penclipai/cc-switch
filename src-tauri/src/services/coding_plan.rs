@@ -6,6 +6,7 @@
 use super::subscription::{
     CredentialStatus, QuotaTier, SubscriptionQuota, TIER_FIVE_HOUR, TIER_MONTHLY, TIER_WEEKLY_LIMIT,
 };
+use crate::services::api_key_vars::unauthorized::native_usage;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ── 供应商检测 ──────────────────────────────────────────────
@@ -179,7 +180,11 @@ pub(crate) async fn query_kimi_at(
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
@@ -197,6 +202,7 @@ pub(crate) async fn query_kimi_at(
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -210,6 +216,7 @@ pub(crate) async fn query_kimi_at(
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+    native_usage::json(&body);
 
     let mut tiers = Vec::new();
 
@@ -410,12 +417,17 @@ async fn query_zhipu_at(url: &str, api_key: &str) -> Result<CodingPlanOutcome, S
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(CodingPlanOutcome::Quota(zhipu_auth_error(status)));
     }
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(CodingPlanOutcome::Quota(make_error(format!(
             "API error (HTTP {status}): {body}"
         ))));
@@ -435,6 +447,7 @@ async fn query_zhipu_at(url: &str, api_key: &str) -> Result<CodingPlanOutcome, S
             ))))
         }
     };
+    native_usage::json(&body);
 
     Ok(zhipu_outcome_from_body(&body))
 }
@@ -567,7 +580,11 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> Result<SubscriptionQuota, 
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
@@ -585,6 +602,7 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> Result<SubscriptionQuota, 
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -598,6 +616,7 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> Result<SubscriptionQuota, 
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+    native_usage::json(&body);
 
     // 检查业务级别错误
     if let Some(base_resp) = body.get("base_resp") {
@@ -651,7 +670,11 @@ async fn query_zenmux(base_url: &str, api_key: &str) -> Result<SubscriptionQuota
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
@@ -669,6 +692,7 @@ async fn query_zenmux(base_url: &str, api_key: &str) -> Result<SubscriptionQuota
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -682,6 +706,7 @@ async fn query_zenmux(base_url: &str, api_key: &str) -> Result<SubscriptionQuota
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+    native_usage::json(&body);
 
     // 检查业务级别错误
     if body.get("success").and_then(|v| v.as_bool()) != Some(true) {
@@ -917,11 +942,13 @@ async fn query_opencode_go(api_key: &str) -> Result<SubscriptionQuota, String> {
     // 403 EntitlementError：key 本身有效（Zen 与 Go 共用同一把 workspace
     // API key），但该 workspace 没有 Go 订阅——与 401 认证失败分开提示。
     if status == reqwest::StatusCode::FORBIDDEN {
+        native_usage::auth_error(resp).await;
         return Ok(make_error(
             "API key is valid but has no OpenCode Go subscription (HTTP 403)".to_string(),
         ));
     }
     if status == reqwest::StatusCode::UNAUTHORIZED {
+        native_usage::auth_error(resp).await;
         return Ok(SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
@@ -938,6 +965,7 @@ async fn query_opencode_go(api_key: &str) -> Result<SubscriptionQuota, String> {
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -949,6 +977,8 @@ async fn query_opencode_go(api_key: &str) -> Result<SubscriptionQuota, String> {
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+
+    native_usage::json(&body);
 
     let tiers = parse_opencode_go_tiers(&body);
     // 三个窗口一个都没解析出来 = 响应形态不认识（未文档化端点可能再次
@@ -1016,6 +1046,7 @@ async fn fetch_command_code_json(
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
+        native_usage::auth_error(response).await;
         return Ok(CommandCodeFetch::AuthExpired);
     }
 
@@ -1023,6 +1054,7 @@ async fn fetch_command_code_json(
         .bytes()
         .await
         .map_err(|e| format!("Failed to read response: {e}"))?;
+    native_usage::bytes(&raw);
     if !status.is_success() {
         let body = String::from_utf8_lossy(&raw);
         return Ok(CommandCodeFetch::Error(format!(
@@ -1031,7 +1063,10 @@ async fn fetch_command_code_json(
     }
 
     match serde_json::from_slice(&raw) {
-        Ok(body) => Ok(CommandCodeFetch::Body(body)),
+        Ok(body) => {
+            native_usage::json(&body);
+            Ok(CommandCodeFetch::Body(body))
+        }
         Err(e) => Ok(CommandCodeFetch::Error(format!(
             "Failed to parse response: {e}"
         ))),
@@ -1805,12 +1840,17 @@ async fn query_zhipu_team_at(
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        native_usage::auth_error(resp).await;
         return Ok(zhipu_auth_error(status));
     }
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        native_usage::bytes(body.as_bytes());
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
@@ -1824,6 +1864,7 @@ async fn query_zhipu_team_at(
         Ok(v) => v,
         Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
+    native_usage::json(&body);
 
     // 团队版没有套餐不回落余额：用户是显式选的团队版，余额接口也不认组织 / 项目头，
     // 查到的未必是这个团队的钱。

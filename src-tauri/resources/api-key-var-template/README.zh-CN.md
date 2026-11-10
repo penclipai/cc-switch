@@ -63,7 +63,7 @@ CC Switch 会提供：
 
 - `CC_SWITCH_CONTRACT_VERSION=2`
 - `CC_SWITCH_VAR_NAME`：正在刷新的变量名
-- `CC_SWITCH_REASON`：`startup`、`scheduled`、`switch`、`manual`、`test` 或 `retry`
+- `CC_SWITCH_REASON` 可取 `startup`、`scheduled`、`switch`、`manual`、`test`、`retry` 或 `unauthorized`。当 CC Switch 收到使用该变量的供应商返回的 HTTP 401 或顶层 JSON `code` 为 401 时，以 `unauthorized` 为原因执行脚本。
 - `CC_SWITCH_CURRENT_EXPIRES_AT`：可选，当前过期时间的 ISO-8601 UTC 字符串
 
 配置错误、认证失败和无效响应应以退出码 `2` 结束，让用户处理；网络错误、超时、HTTP 408/429/5xx 应以退出码 `1` 结束，让 CC Switch 按退避策略重试。模板已按此规则实现。

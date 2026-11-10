@@ -32,6 +32,7 @@ use crate::proxy::providers::copilot_model_map::{
     CopilotProtocol, CopilotTransport, ResolvedCopilotModel,
 };
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
+use crate::services::api_key_vars::unauthorized::{self, CredentialUse};
 use crate::{
     app_config::AppType,
     provider::{CodexCopilotApiFormat, LocalProxyRequestOverrides, Provider},
@@ -47,6 +48,74 @@ use tauri::Manager;
 use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
+/// Pass a likely-JSON, non-SSE response through while recording at most the
+/// proxy's established response-body maximum. This does not pre-read or replay
+/// the body. Each upstream chunk reaches the client unchanged.
+fn observe_json_unauthorized_response(
+    response: ProxyResponse,
+    credential_use: CredentialUse,
+) -> ProxyResponse {
+    if response.is_sse() {
+        return response;
+    }
+
+    let status = response.status();
+    let headers = response.headers().clone();
+    let content_encoding = get_content_encoding(&headers);
+    let inspect_untyped_or_text = response.content_type().is_none_or(|content_type| {
+        response.is_json()
+            || content_type
+                .split(';')
+                .next()
+                .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/plain"))
+    });
+    if !inspect_untyped_or_text {
+        return response;
+    }
+    let observed = async_stream::stream! {
+        let mut body = Some(bytes::BytesMut::new());
+        let mut check_prefix = content_encoding.is_none();
+        let mut response_stream = response.bytes_stream();
+
+        while let Some(chunk) = response_stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if check_prefix {
+                        if let Some(first) = bytes.iter().find(|byte| !byte.is_ascii_whitespace()) {
+                            check_prefix = false;
+                            if *first != b'{' { body = None; }
+                        }
+                    }
+                    if let Some(observed) = body.as_mut() {
+                        if observed.len().saturating_add(bytes.len()) <= MAX_RESPONSE_BODY_BYTES {
+                            observed.extend_from_slice(&bytes);
+                        } else {
+                            body = None;
+                        }
+                    }
+                    yield Ok(bytes);
+                }
+                Err(error) => {
+                    body = None;
+                    yield Err(error);
+                    break;
+                }
+            }
+        }
+
+        if let Some(raw) = body {
+            match content_encoding.as_deref() {
+                Some(encoding) => match decompress_body_with_limit(encoding, &raw, MAX_RESPONSE_BODY_BYTES) {
+                    Ok(Some(decoded)) => credential_use.observe_json(&decoded),
+                    Ok(None) => credential_use.observe_json(&raw),
+                    Err(_) => {}
+                },
+                None => credential_use.observe_json(&raw),
+            }
+        }
+    };
+    ProxyResponse::streamed(status, headers, observed)
+}
 
 /// Whether the upstream belongs to the OpenCode gateway (`opencode.ai`).
 ///
@@ -2218,6 +2287,10 @@ impl RequestForwarder {
         // 获取认证头（提前准备，用于内联替换），同时保留仅用于日志脱敏的
         // 精确认证材料。实际日志永远不输出这些值。
         let mut log_secrets: Vec<String> = Vec::new();
+        // The raw credential comes from the adapter's selected field. Capturing
+        // it after managed OAuth substitution avoids refreshing an unrelated
+        // variable with the same current literal value.
+        let mut unauthorized_credential: Option<CredentialUse> = None;
         let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
             // GitHub Copilot 特殊处理：从 CopilotAuthManager 获取真实 token
             if auth.strategy == AuthStrategy::GitHubCopilot {
@@ -2372,6 +2445,18 @@ impl RequestForwarder {
                     return Err(ProxyError::AuthError(
                         "xAI OAuth 认证不可用（无 AppHandle）".to_string(),
                     ));
+                }
+            }
+
+            if !codex_official_auth_passthrough
+                && !matches!(
+                    auth.strategy,
+                    AuthStrategy::GitHubCopilot | AuthStrategy::CodexOAuth | AuthStrategy::XaiOAuth
+                )
+            {
+                if let Some(raw_credential) = adapter.extract_selected_raw_credential(provider) {
+                    unauthorized_credential =
+                        CredentialUse::capture(&raw_credential, &auth.api_key);
                 }
             }
 
@@ -2939,6 +3024,12 @@ impl RequestForwarder {
         let status = response.status();
 
         if status.is_success() {
+            let response = match unauthorized_credential.take() {
+                Some(credential_use) => {
+                    observe_json_unauthorized_response(response, credential_use)
+                }
+                None => response,
+            };
             let mut response = self
                 .prepare_success_response_for_failover(response, request_is_streaming)
                 .await?;
@@ -2976,6 +3067,11 @@ impl RequestForwarder {
             Ok((response, resolved_claude_api_format, outbound_model))
         } else {
             let status_code = status.as_u16();
+            if status == http::StatusCode::UNAUTHORIZED {
+                if let Some(credential_use) = unauthorized_credential.as_ref() {
+                    credential_use.signal();
+                }
+            }
             // 错误响应同样可能被上游压缩（content-encoding）。reqwest 未启用任何
             // 自动解压 feature，这里拿到的是原始字节；不解压的话，压缩过的错误体会
             // 在 from_utf8 处变成非 UTF-8 而被丢弃，隐藏掉上游的限流/鉴权等详情。
@@ -2993,6 +3089,15 @@ impl RequestForwarder {
                 None => raw.to_vec(),
             };
             let body_text = String::from_utf8(decoded).ok();
+            if status != http::StatusCode::UNAUTHORIZED
+                && body_text
+                    .as_deref()
+                    .is_some_and(|body| unauthorized::json_code_401(body.as_bytes()))
+            {
+                if let Some(credential_use) = unauthorized_credential.as_ref() {
+                    credential_use.signal();
+                }
+            }
 
             Err(ProxyError::UpstreamError {
                 status: status_code,
@@ -4787,6 +4892,230 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn unauthorized_json_observer_signals_the_matched_variable_and_preserves_body() {
+        const NAME: &str = "FORWARDER_UNAUTHORIZED_JSON";
+        const KEY: &str = "forwarder-dynamic-key";
+        crate::services::api_key_vars::resolve::cache_set(NAME, true, Some(KEY));
+        let credential = CredentialUse::capture(&format!("{{{{{NAME}}}}}"), KEY)
+            .expect("the selected dynamic key should be captured");
+        let response = ProxyResponse::buffered(
+            StatusCode::OK,
+            http::HeaderMap::new(),
+            Bytes::from_static(br#"{"code":401,"message":"expired key"}"#),
+        );
+
+        let body = observe_json_unauthorized_response(response, credential)
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .expect("the response body remains readable");
+
+        assert_eq!(
+            body,
+            Bytes::from_static(br#"{"code":401,"message":"expired key"}"#)
+        );
+        assert!(crate::services::api_key_vars::resolve::rejection_pending(
+            NAME
+        ));
+        crate::services::api_key_vars::resolve::cache_remove(NAME);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_json_observer_does_not_signal_an_invalid_json_suffix() {
+        const NAME: &str = "FORWARDER_UNAUTHORIZED_JSON_INVALID";
+        const KEY: &str = "forwarder-dynamic-key-invalid";
+        crate::services::api_key_vars::resolve::cache_set(NAME, true, Some(KEY));
+        let credential = CredentialUse::capture(&format!("{{{{{NAME}}}}}"), KEY)
+            .expect("the selected dynamic key should be captured");
+        let body = Bytes::from_static(br#"{"code":401} trailing"#);
+        let response =
+            ProxyResponse::buffered(StatusCode::OK, http::HeaderMap::new(), body.clone());
+
+        let forwarded = observe_json_unauthorized_response(response, credential)
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .expect("the response body remains readable");
+
+        assert_eq!(forwarded, body);
+        assert!(!crate::services::api_key_vars::resolve::rejection_pending(
+            NAME
+        ));
+        crate::services::api_key_vars::resolve::cache_remove(NAME);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_json_observer_accepts_normal_json_larger_than_64_kib() {
+        const NAME: &str = "FORWARDER_UNAUTHORIZED_JSON_LARGE";
+        const KEY: &str = "forwarder-large-dynamic-key";
+        crate::services::api_key_vars::resolve::cache_set(NAME, true, Some(KEY));
+        let credential = CredentialUse::capture(&format!("{{{{{NAME}}}}}"), KEY)
+            .expect("the selected dynamic key should be captured");
+        let message = "x".repeat(80 * 1024);
+        let body = Bytes::from(serde_json::json!({ "code": 401, "message": message }).to_string());
+        let response =
+            ProxyResponse::buffered(StatusCode::OK, http::HeaderMap::new(), body.clone());
+
+        let forwarded = observe_json_unauthorized_response(response, credential)
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .expect("the large response body remains readable");
+
+        assert_eq!(forwarded, body);
+        assert!(crate::services::api_key_vars::resolve::rejection_pending(
+            NAME
+        ));
+        crate::services::api_key_vars::resolve::cache_remove(NAME);
+    }
+
+    async fn unauthorized_loopback(status: StatusCode, body: String) -> String {
+        let app = axum::Router::new().fallback(move || {
+            let body = body.clone();
+            async move {
+                (
+                    status,
+                    [(http::header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+            }
+        });
+        serve_upstream(app).await
+    }
+
+    fn dynamic_claude_provider(base_url: String, key: &str, selected_key: &str) -> Provider {
+        let mut provider = test_provider_with_type(None);
+        let mut env = serde_json::Map::new();
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            serde_json::Value::String(base_url),
+        );
+        env.insert(
+            selected_key.to_string(),
+            serde_json::Value::String(key.to_string()),
+        );
+        provider.settings_config = serde_json::json!({ "env": env });
+        provider
+    }
+
+    async fn forward_dynamic_claude(provider: Provider) -> Result<ForwardResult, ForwardError> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        test_forwarder(Duration::ZERO, Duration::ZERO)
+            .forward_with_retry(
+                &AppType::Claude,
+                http::Method::POST,
+                "/v1/messages",
+                &serde_json::json!({ "model": "test", "messages": [], "max_tokens": 1 }),
+                http::HeaderMap::new(),
+                Extensions::new(),
+                &[provider],
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn forwarder_http_401_signals_only_the_selected_dynamic_variable() {
+        const NAME: &str = "FORWARDER_HTTP_401";
+        const KEY: &str = "forwarder-http-401-key";
+        crate::services::api_key_vars::resolve::cache_set(NAME, true, Some(KEY));
+        let endpoint = unauthorized_loopback(StatusCode::UNAUTHORIZED, "denied".to_string()).await;
+        let provider =
+            dynamic_claude_provider(endpoint, &format!("{{{{{NAME}}}}}"), "ANTHROPIC_API_KEY");
+
+        let error = match forward_dynamic_claude(provider).await {
+            Err(error) => error,
+            Ok(_) => panic!("the HTTP 401 should reach the normal error path"),
+        };
+
+        assert!(matches!(
+            error.error,
+            ProxyError::UpstreamError { status: 401, .. }
+        ));
+        assert!(crate::services::api_key_vars::resolve::rejection_pending(
+            NAME
+        ));
+        crate::services::api_key_vars::resolve::cache_remove(NAME);
+    }
+
+    #[tokio::test]
+    async fn forwarder_2xx_json_401_signals_but_403_does_not() {
+        const NAME: &str = "FORWARDER_JSON_401";
+        const KEY: &str = "forwarder-json-401-key";
+        crate::services::api_key_vars::resolve::cache_set(NAME, true, Some(KEY));
+        let endpoint = unauthorized_loopback(
+            StatusCode::OK,
+            serde_json::json!({ "code": 401, "message": "expired" }).to_string(),
+        )
+        .await;
+        let provider =
+            dynamic_claude_provider(endpoint, &format!("{{{{{NAME}}}}}"), "ANTHROPIC_API_KEY");
+        let response = forward_dynamic_claude(provider)
+            .await
+            .unwrap_or_else(|error| panic!("unexpected forward failure: {}", error.error));
+        let body = response
+            .response
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .expect("the response body is forwarded");
+        assert_eq!(
+            body,
+            Bytes::from_static(br#"{"code":401,"message":"expired"}"#)
+        );
+        assert!(crate::services::api_key_vars::resolve::rejection_pending(
+            NAME
+        ));
+        crate::services::api_key_vars::resolve::cache_remove(NAME);
+
+        const FORBIDDEN_NAME: &str = "FORWARDER_HTTP_403";
+        const FORBIDDEN_KEY: &str = "forwarder-http-403-key";
+        crate::services::api_key_vars::resolve::cache_set(
+            FORBIDDEN_NAME,
+            true,
+            Some(FORBIDDEN_KEY),
+        );
+        let endpoint = unauthorized_loopback(StatusCode::FORBIDDEN, "forbidden".to_string()).await;
+        let provider = dynamic_claude_provider(
+            endpoint,
+            &format!("{{{{{FORBIDDEN_NAME}}}}}"),
+            "ANTHROPIC_API_KEY",
+        );
+        let error = match forward_dynamic_claude(provider).await {
+            Err(error) => error,
+            Ok(_) => panic!("the HTTP 403 should reach the normal error path"),
+        };
+        assert!(matches!(
+            error.error,
+            ProxyError::UpstreamError { status: 403, .. }
+        ));
+        assert!(!crate::services::api_key_vars::resolve::rejection_pending(
+            FORBIDDEN_NAME
+        ));
+        crate::services::api_key_vars::resolve::cache_remove(FORBIDDEN_NAME);
+    }
+
+    #[tokio::test]
+    async fn forwarder_does_not_signal_an_unselected_dynamic_key() {
+        const NAME: &str = "FORWARDER_UNSELECTED_KEY";
+        const KEY: &str = "forwarder-unselected-key";
+        crate::services::api_key_vars::resolve::cache_set(NAME, true, Some(KEY));
+        let endpoint = unauthorized_loopback(StatusCode::UNAUTHORIZED, "denied".to_string()).await;
+        let mut provider =
+            dynamic_claude_provider(endpoint, "literal-selected-key", "ANTHROPIC_AUTH_TOKEN");
+        provider.settings_config["env"]["ANTHROPIC_API_KEY"] =
+            serde_json::Value::String(format!("{{{{{NAME}}}}}"));
+
+        let error = match forward_dynamic_claude(provider).await {
+            Err(error) => error,
+            Ok(_) => panic!("the HTTP 401 should reach the normal error path"),
+        };
+        assert!(matches!(
+            error.error,
+            ProxyError::UpstreamError { status: 401, .. }
+        ));
+        assert!(!crate::services::api_key_vars::resolve::rejection_pending(
+            NAME
+        ));
+        crate::services::api_key_vars::resolve::cache_remove(NAME);
+    }
 
     #[test]
     fn opencode_upstream_host_matching() {

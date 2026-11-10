@@ -5127,13 +5127,13 @@
       "contractTitle": "スクリプトの実行仕様",
       "contractOutput": "index.mjs を優先し、なければ index.js を実行します。作業ディレクトリはスクリプトのディレクトリで、別ファイルのインポートも可能です。成功時の stdout は JSON オブジェクト 1 つだけ（最大 64 KiB）です。空白を含まない apiKey は必須、expiresAt、refreshAfter、message は省略可能です。診断情報は stderr に書き、認証情報や生のレスポンスを出力しないでください。",
       "contractTime": "expiresAt と refreshAfter はタイムゾーン付き ISO-8601（例：2030-01-01T00:00:00Z）または Unix 秒を受け取ります。Date.now() のミリ秒をそのまま出力しないでください。expiresAt は未来である必要があります。",
-      "contractSchedule": "refreshAfter を優先します。省略時は expiresAt から事前更新時間を引いた時刻に更新し、両方なければ毎時更新します。標準のスクリプトタイムアウトは 30 秒、事前更新は 5 分です。HTTP タイムアウトはスクリプトタイムアウトより短くしてください。",
+      "contractSchedule": "refreshAfter を優先します。省略時は expiresAt から事前更新時間を引いた時刻に更新し、両方なければ毎時更新します。標準のスクリプトタイムアウトは 30 秒、事前更新は 5 分です。HTTP タイムアウトはスクリプトタイムアウトより短くしてください。この変数を使うプロバイダーリクエストが HTTP 401 または JSON {code: 401} を返すと、直ちに更新します。",
       "contractExit": "終了コード 0 は成功、2 は手動対応が必要な設定・認証・レスポンスのエラーです。それ以外の非ゼロ終了コードは自動再試行されます。サンプルはネットワークエラー、タイムアウト、HTTP 408/429/5xx で 1 を返します。",
       "environmentTitle": "CC Switch が設定する環境変数",
       "environment": {
         "CC_SWITCH_CONTRACT_VERSION": "実行仕様のバージョン。現在は 2 です。",
         "CC_SWITCH_VAR_NAME": "現在の変数名（例：MY_KEY）。",
-        "CC_SWITCH_REASON": "実行理由：startup、scheduled、switch、manual、test、retry。",
+        "CC_SWITCH_REASON": "実行理由：startup、scheduled、switch、manual、test、retry、unauthorized（プロバイダーが現在の認証情報を拒否）。",
         "CC_SWITCH_CURRENT_EXPIRES_AT": "省略可能：現在のキーの有効期限（UTC ISO-8601）。初回取得時は設定されません。"
       },
       "filesTitle": "テンプレートファイル（ZIP と同じ内容）"
@@ -5184,6 +5184,8 @@
     "enable": "自動更新",
     "timeout": "タイムアウト（秒、5–300）",
     "leadTime": "事前更新（分）",
+    "retryCount": "自動更新の再試行回数（0～5）",
+    "retryCountHint": "定期更新または 401 を受けて開始した更新で、一時的なエラーが発生したときの追加試行回数です。上限に達すると、次の更新まで待機します。",
     "test": "スクリプトをテスト",
     "testSuccess": "成功：{{value}} · 有効期限 {{time}} · {{file}}",
     "securityTitle": "ローカルスクリプトの実行を許可しますか？",

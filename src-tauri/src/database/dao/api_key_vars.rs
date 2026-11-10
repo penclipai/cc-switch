@@ -46,14 +46,14 @@ pub enum DeleteApiKeyVarOutcome {
     InUse(Vec<ApiKeyVarReference>),
 }
 
-const COLUMNS: &str = "name, script_dir, enabled, timeout_secs, lead_time_secs, value, state_json, sort_index, created_at, updated_at";
+const COLUMNS: &str = "name, script_dir, enabled, timeout_secs, lead_time_secs, retry_count, value, state_json, sort_index, created_at, updated_at";
 
 fn db_err(e: rusqlite::Error) -> AppError {
     AppError::Database(e.to_string())
 }
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<ApiKeyVarRecord> {
-    let state_json: String = row.get(6)?;
+    let state_json: String = row.get(7)?;
     let timeout: Option<i64> = row.get(3)?;
     let lead: Option<i64> = row.get(4)?;
     let record = ApiKeyVarRecord {
@@ -63,12 +63,16 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<ApiKeyVarRecord> {
             enabled: row.get::<_, i64>(2)? != 0,
             timeout_secs: timeout.map(|v| v.max(0) as u64),
             lead_time_secs: lead.map(|v| v.max(0) as u64),
+            retry_count: row.get::<_, i64>(5)?.clamp(
+                0,
+                i64::from(crate::services::api_key_vars::runner::MAX_RETRY_COUNT),
+            ) as u8,
         },
-        value: row.get::<_, Option<String>>(5)?.filter(|v| !v.is_empty()),
+        value: row.get::<_, Option<String>>(6)?.filter(|v| !v.is_empty()),
         state: serde_json::from_str(&state_json).unwrap_or_default(),
-        sort_index: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        sort_index: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     };
     observe_timestamp(record.created_at);
     observe_timestamp(record.updated_at);
@@ -217,6 +221,10 @@ impl Database {
         name: &str,
         config: &ApiKeyRefreshConfig,
     ) -> Result<ApiKeyVarRecord, AppError> {
+        let mut config = config.clone();
+        config.retry_count = config
+            .retry_count
+            .min(crate::services::api_key_vars::runner::MAX_RETRY_COUNT);
         let lookup_name = original.unwrap_or(name);
         let record = {
             let mut conn = lock_conn!(self.conn);
@@ -237,7 +245,7 @@ impl Database {
                     // but discard the old script's success/schedule markers
                     // so the scheduler runs the replacement immediately.
                     let script_changed = rec.config.script_dir != config.script_dir;
-                    if rec.config != *config {
+                    if rec.config != config {
                         rec.state.consecutive_failures = 0;
                         rec.state.needs_attention = false;
                         rec.state.last_error = None;
@@ -251,14 +259,15 @@ impl Database {
                     rec.updated_at = now;
                     tx.execute(
                         "UPDATE api_key_vars SET name = ?1, script_dir = ?2, enabled = ?3,
-                            timeout_secs = ?4, lead_time_secs = ?5, state_json = ?6, updated_at = ?7
-                         WHERE name = ?8",
+                            timeout_secs = ?4, lead_time_secs = ?5, retry_count = ?6, state_json = ?7, updated_at = ?8
+                         WHERE name = ?9",
                         params![
                             name,
                             config.script_dir,
                             config.enabled as i64,
                             config.timeout_secs.map(|v| v as i64),
                             config.lead_time_secs.map(|v| v as i64),
+                            i64::from(config.retry_count),
                             serde_json::to_string(&rec.state).unwrap_or_else(|_| "{}".into()),
                             now,
                             lookup_name,
@@ -278,7 +287,7 @@ impl Database {
                         .map_err(db_err)?;
                     tx.execute(
                         &format!(
-                            "INSERT INTO api_key_vars ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, NULL, '{{}}', ?6, ?7, ?7)"
+                            "INSERT INTO api_key_vars ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, '{{}}', ?7, ?8, ?8)"
                         ),
                         params![
                             name,
@@ -286,6 +295,7 @@ impl Database {
                             config.enabled as i64,
                             config.timeout_secs.map(|v| v as i64),
                             config.lead_time_secs.map(|v| v as i64),
+                            i64::from(config.retry_count),
                             sort_index,
                             now,
                         ],
@@ -516,6 +526,7 @@ mod tests {
             script_dir: dir.into(),
             timeout_secs: Some(10),
             lead_time_secs: None,
+            retry_count: 0,
         }
     }
 
@@ -757,6 +768,7 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "DAO_T_ONE");
         assert_eq!(list[0].config.timeout_secs, Some(10));
+        assert_eq!(list[0].config.retry_count, 0);
 
         let st = ApiKeyRefreshState {
             expires_at: Some(123),
@@ -806,6 +818,24 @@ mod tests {
         assert_eq!(
             resolve::lookup("DAO_T_RENAMED").0,
             resolve::RefStatus::Unknown
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retry_count_is_persisted_and_clamped() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let config = ApiKeyRefreshConfig {
+            retry_count: 99,
+            ..cfg("/retry", true)
+        };
+        db.upsert_api_key_var(None, "DAO_T_RETRY_COUNT", &config)?;
+        assert_eq!(
+            db.get_api_key_var("DAO_T_RETRY_COUNT")?
+                .expect("saved variable")
+                .config
+                .retry_count,
+            crate::services::api_key_vars::runner::MAX_RETRY_COUNT
         );
         Ok(())
     }

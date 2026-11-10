@@ -14,6 +14,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
+use super::unauthorized::{ActiveRefresh, CredentialUse, Generation};
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -87,6 +89,7 @@ struct CacheEntry {
     enabled: bool,
     value: Option<String>,
     previous: Vec<String>,
+    generation: Generation,
 }
 
 fn cache() -> &'static RwLock<HashMap<String, CacheEntry>> {
@@ -98,6 +101,9 @@ fn cache() -> &'static RwLock<HashMap<String, CacheEntry>> {
 pub fn cache_set(name: &str, enabled: bool, value: Option<&str>) {
     let mut guard = cache().write().unwrap_or_else(|e| e.into_inner());
     let entry = guard.entry(name.to_string()).or_default();
+    if !entry.generation.refreshing() {
+        entry.generation = Generation::default();
+    }
     entry.enabled = enabled;
     let new_value = value.filter(|v| !v.is_empty()).map(str::to_string);
     if let Some(old) = entry.value.take() {
@@ -137,10 +143,39 @@ pub fn cache_load(entries: impl IntoIterator<Item = (String, bool, Option<String
                 enabled,
                 value: value.filter(|v| !v.is_empty()),
                 previous: Vec::new(),
+                generation: Generation::default(),
             },
         );
     }
     *cache().write().unwrap_or_else(|e| e.into_inner()) = map;
+}
+
+pub(super) fn credential_use(name: &str, sent_key: &str) -> Option<CredentialUse> {
+    let guard = cache().read().unwrap_or_else(|e| e.into_inner());
+    let entry = guard.get(name)?;
+    if entry.enabled && entry.value.as_deref() == Some(sent_key) {
+        entry.generation.credential()
+    } else {
+        None
+    }
+}
+
+pub(crate) fn rejection_pending(name: &str) -> bool {
+    let guard = cache().read().unwrap_or_else(|e| e.into_inner());
+    guard
+        .get(name)
+        .is_some_and(|entry| entry.enabled && entry.generation.pending())
+}
+
+/// Retire in-flight requests as a refresh starts, including when its script
+/// later fails or returns the same key. The caller holds the per-variable lock.
+pub(super) fn begin_refresh(name: &str, rejected_only: bool) -> Option<ActiveRefresh> {
+    let mut guard = cache().write().unwrap_or_else(|e| e.into_inner());
+    let entry = guard.get_mut(name)?;
+    if rejected_only && !(entry.enabled && entry.generation.pending()) {
+        return None;
+    }
+    Some(entry.generation.start())
 }
 
 /// 变量的所有已知值（当前值 + 最近历史值），用于写回保护与日志脱敏

@@ -5128,13 +5128,13 @@
       "contractTitle": "腳本執行約定",
       "contractOutput": "入口優先為 index.mjs，其次為 index.js；工作目錄為腳本目錄，支援匯入其他檔案。成功時 stdout 僅輸出一個 JSON 物件（不超過 64 KiB），apiKey 必填且不能包含空白；expiresAt、refreshAfter、message 可選。診斷寫入 stderr，請勿輸出憑證或原始介面回應。",
       "contractTime": "expiresAt 和 refreshAfter 接受帶時區的 ISO-8601 時間（如 2030-01-01T00:00:00Z）或 Unix 秒數。不要直接輸出 Date.now() 的毫秒值；expiresAt 必須在未來。",
-      "contractSchedule": "優先按 refreshAfter 更新；未提供時按 expiresAt 減去提前更新時間，均未提供時每小時更新。預設腳本逾時 30 秒，提前更新 5 分鐘。HTTP 請求逾時應短於腳本逾時。",
+      "contractSchedule": "優先按 refreshAfter 更新；未提供時按 expiresAt 減去提前更新時間，均未提供時每小時更新。預設腳本逾時 30 秒，提前更新 5 分鐘。HTTP 請求逾時應短於腳本逾時。使用此變數的供應商請求回傳 HTTP 401 或 JSON {code: 401} 時，會立即觸發重新整理。",
       "contractExit": "結束碼 0 表示成功；2 表示設定、認證或回應錯誤，需要人工處理；其他非 0 結束碼會自動重試。範例對網路、逾時、HTTP 408/429/5xx 回傳 1。",
       "environmentTitle": "CC Switch 注入的環境變數",
       "environment": {
         "CC_SWITCH_CONTRACT_VERSION": "執行約定版本，目前為 2。",
         "CC_SWITCH_VAR_NAME": "目前變數名稱，例如 MY_KEY。",
-        "CC_SWITCH_REASON": "執行原因：startup、scheduled、switch、manual、test 或 retry。",
+        "CC_SWITCH_REASON": "執行原因：startup、scheduled、switch、manual、test、retry 或 unauthorized（供應商拒絕目前憑證）。",
         "CC_SWITCH_CURRENT_EXPIRES_AT": "可選：目前 Key 的到期時間，UTC ISO-8601 格式。首次取得時不提供。"
       },
       "filesTitle": "範本檔案（與 ZIP 內容一致）"
@@ -5185,6 +5185,8 @@
     "enable": "啟用自動重新整理",
     "timeout": "逾時（秒，5–300）",
     "leadTime": "提前重新整理（分鐘）",
+    "retryCount": "自動重新整理重試次數（0–5）",
+    "retryCountHint": "定時或由 401 觸發的重新整理遇到暫時性錯誤時，每輪額外嘗試的次數。用盡後依退避排程等待下一輪。",
     "test": "測試指令碼",
     "testSuccess": "成功：{{value}} · 到期時間 {{time}} · {{file}}",
     "securityTitle": "允許執行本機指令碼？",
