@@ -908,7 +908,8 @@ function App() {
           activeApp === "mcode" ||
           activeApp === "dsh" ||
           activeApp === "kimi" ||
-          activeApp === "agy"
+          activeApp === "agy" ||
+          activeApp === "copilot"
         )
           return;
         const conflicts = await checkEnvConflicts(activeApp);
@@ -1640,7 +1641,8 @@ function App() {
       activeApp === "claude" ||
       activeApp === "codex" ||
       activeApp === "agy" ||
-      activeApp === "grokbuild"
+      activeApp === "grokbuild" ||
+      activeApp === "copilot"
         ? setTerminalProvider
         : undefined,
     onCreate: () => openAddProvider(currentModeView),

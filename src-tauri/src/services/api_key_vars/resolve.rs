@@ -72,7 +72,7 @@ pub fn supports_app(app: &AppType) -> bool {
         | AppType::Hermes
         | AppType::Pi
         | AppType::Mcode => true,
-        AppType::Agy | AppType::Kimi | AppType::Dsh | AppType::Omp => false,
+        AppType::Agy | AppType::Kimi | AppType::Dsh | AppType::Omp | AppType::Copilot => false,
     }
 }
 
