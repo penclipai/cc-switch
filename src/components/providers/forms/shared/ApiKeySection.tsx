@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import ApiKeyInput from "../ApiKeyInput";
 import type { ProviderCategory } from "@/types";
@@ -19,6 +20,10 @@ interface ApiKeySectionProps {
   required?: boolean;
   isPartner?: boolean;
   partnerPromotionKey?: string;
+  /** 允许 `{{NAME}}` 引用 API Key 变量 */
+  allowVarRef?: boolean;
+  /** 输入框下方的说明；有推广语时让位给推广语 */
+  hint?: ReactNode;
 }
 
 export function ApiKeySection({
@@ -33,6 +38,8 @@ export function ApiKeySection({
   disabled,
   required = false,
   partnerPromotionKey,
+  allowVarRef = true,
+  hint,
 }: ApiKeySectionProps) {
   const { t } = useTranslation();
 
@@ -75,19 +82,20 @@ export function ApiKeySection({
       }
       disabled={isDisabled}
       required={isRequired}
+      allowVarRef={allowVarRef && !isDisabled}
       labelAside={
         showLink ? (
           <a
             href={websiteUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-caption text-fg-1 underline underline-offset-2 hover:text-fg-2"
+            className="text-caption text-blue-400 dark:text-blue-500 hover:text-blue-500 dark:hover:text-blue-400 transition-colors"
           >
             {t("providerForm.getApiKey", { defaultValue: "获取 API Key" })} ↗
           </a>
         ) : null
       }
-      hint={promotion || undefined}
+      hint={promotion || hint || undefined}
     />
   );
 }

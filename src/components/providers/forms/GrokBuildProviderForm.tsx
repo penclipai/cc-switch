@@ -31,6 +31,7 @@ import type {
 import type { ProviderFormProps, ProviderFormValues } from "./ProviderForm";
 import { BasicFormFields } from "./BasicFormFields";
 import { CodexFormFields } from "./CodexFormFields";
+import { isValidBillingMultiplier } from "./BillingMultiplierField";
 import { ProviderPresetSelector } from "./ProviderPresetSelector";
 import { InactiveFieldsPanel } from "./InactiveFieldsPanel";
 import {
@@ -157,6 +158,9 @@ export function GrokBuildProviderForm({
   );
   const [customUserAgent, setCustomUserAgent] = useState(
     initialData?.meta?.customUserAgent ?? "",
+  );
+  const [billingMultiplier, setBillingMultiplier] = useState(
+    initialData?.meta?.billingMultiplier ?? "",
   );
   const [headersOverride, setHeadersOverride] = useState(
     formatRequestOverrideObject(
@@ -397,6 +401,14 @@ export function GrokBuildProviderForm({
       toast.error(requestOverrides.error);
       return;
     }
+    if (!isValidBillingMultiplier(billingMultiplier)) {
+      toast.error(
+        t("providerForm.billingMultiplierInvalid", {
+          defaultValue: "请输入 0 到 1000 的数字，或留空使用 1 倍。",
+        }),
+      );
+      return;
+    }
 
     const customEndpoints = Object.fromEntries(
       draftCustomEndpoints.map((url) => [
@@ -419,6 +431,7 @@ export function GrokBuildProviderForm({
       promptCacheRouting,
       codexChatReasoning,
       customUserAgent: customUserAgent.trim() || undefined,
+      billingMultiplier: billingMultiplier.trim() || undefined,
       localProxyRequestOverrides: requestOverrides.overrides,
       maxOutputTokens:
         Number.isInteger(parsedMaxOutputTokens) && parsedMaxOutputTokens > 0
@@ -513,6 +526,8 @@ export function GrokBuildProviderForm({
               onPromptCacheRoutingChange={setPromptCacheRouting}
               speedTestEndpoints={speedTestEndpoints}
               customUserAgent={customUserAgent}
+              billingMultiplier={billingMultiplier}
+              onBillingMultiplierChange={setBillingMultiplier}
               onCustomUserAgentChange={setCustomUserAgent}
               localProxyHeadersOverride={headersOverride}
               onLocalProxyHeadersOverrideChange={setHeadersOverride}
@@ -571,9 +586,8 @@ export function GrokBuildProviderForm({
               <InactiveFieldsPanel
                 fields={inactiveFields}
                 hint={t("grokBuild.inactiveFieldsHint", {
-                  count: inactiveFields.length,
                   defaultValue:
-                    "这个供应商还保存着 {{count}} 个不随切换生效的设置。点击复制它的 TOML，按需粘贴到上方；供应商里保存的原值不会删除。",
+                    "这些是旧版存进卡里的设置，现在切换不会写出去。点一下复制 TOML，需要时粘贴到上方。",
                 })}
                 action={{
                   kind: "copy",

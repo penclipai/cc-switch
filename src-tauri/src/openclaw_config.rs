@@ -5,7 +5,7 @@
 
 use crate::config::{atomic_write, get_app_config_dir};
 use crate::error::AppError;
-use crate::settings::{effective_backup_retain_count, get_openclaw_override_dir};
+use crate::settings::{effective_backup_retain_count, get_override_dir};
 use chrono::Local;
 use indexmap::IndexMap;
 use json_five::rt::parser::{
@@ -33,7 +33,7 @@ const OPENCLAW_TOOLS_PROFILES: &[&str] = &["minimal", "coding", "messaging", "fu
 /// 默认路径: `~/.openclaw/`
 /// 可通过 settings.openclaw_config_dir 覆盖
 pub fn get_openclaw_dir() -> PathBuf {
-    if let Some(override_dir) = get_openclaw_override_dir() {
+    if let Some(override_dir) = get_override_dir(&crate::app_config::AppType::OpenClaw) {
         return override_dir;
     }
 
@@ -155,16 +155,6 @@ pub struct OpenClawAgentsDefaults {
     pub model: Option<OpenClawDefaultModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models: Option<HashMap<String, OpenClawModelCatalogEntry>>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
-}
-
-/// OpenClaw agents 顶层配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct OpenClawAgents {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub defaults: Option<OpenClawAgentsDefaults>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
@@ -322,8 +312,12 @@ impl OpenClawConfigDocument {
     }
 
     fn save(self) -> Result<OpenClawWriteOutcome, AppError> {
-        let _guard = openclaw_write_lock().lock()?;
+        let _guard = crate::sync_utils::lock_file_operation(openclaw_write_lock());
+        self.save_locked()
+    }
 
+    /// Caller holds `openclaw_write_lock` from document load through commit.
+    fn save_locked(self) -> Result<OpenClawWriteOutcome, AppError> {
         let current_source = if self.path.exists() {
             Some(fs::read_to_string(&self.path).map_err(|e| AppError::io(&self.path, e))?)
         } else {
@@ -679,6 +673,41 @@ pub fn set_provider(id: &str, provider_config: Value) -> Result<OpenClawWriteOut
     write_root_section("models", &models_value)
 }
 
+/// Replace only a provider still present in `models.providers`.  The complete
+/// document edit runs under the native write lock, so a provider deleted by
+/// OpenClaw between scheduling and refresh is not recreated.
+pub(crate) fn replace_provider_if_present(
+    id: &str,
+    provider_config: Value,
+) -> Result<bool, AppError> {
+    let _guard = crate::sync_utils::lock_file_operation(openclaw_write_lock());
+    let mut document = OpenClawConfigDocument::load()?;
+    let Some(source) = document.original_source.as_deref() else {
+        return Ok(false);
+    };
+    let mut config: Value = json5::from_str(source).map_err(|error| {
+        AppError::Config(format!("Failed to parse OpenClaw config as JSON5: {error}"))
+    })?;
+    let Some(providers) = config
+        .get_mut("models")
+        .and_then(|models| models.get_mut("providers"))
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(false);
+    };
+    if !providers.contains_key(id) {
+        return Ok(false);
+    }
+    providers.insert(id.to_string(), provider_config);
+    let models = config
+        .get("models")
+        .cloned()
+        .expect("models is present after provider lookup");
+    document.set_root_section("models", &models)?;
+    document.save_locked()?;
+    Ok(true)
+}
+
 /// 删除供应商配置
 pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
     let mut config = read_openclaw_config()?;
@@ -914,14 +943,13 @@ pub fn set_tools_config(tools: &OpenClawToolsConfig) -> Result<OpenClawWriteOutc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync_utils::MutexExt;
     use serial_test::serial;
     use std::sync::{Mutex, OnceLock};
 
     fn test_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
+        LOCK.get_or_init(|| Mutex::new(())).lock_recover()
     }
 
     fn with_test_paths<T>(source: &str, test: impl FnOnce(&Path) -> T) -> T {
@@ -931,20 +959,30 @@ mod tests {
         fs::create_dir_all(&openclaw_dir).unwrap();
         let config_path = openclaw_dir.join("openclaw.json");
         fs::write(&config_path, source).unwrap();
-        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
+        let env = crate::test_support::EnvVars::new()
+            .set("CC_SWITCH_TEST_HOME", temp.path())
+            .set("HOME", temp.path());
         let result = test(&config_path);
-        match old_test_home {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
-        match old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
+        drop(env);
         result
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn replace_if_present_never_creates_and_preserves_other_model_settings() {
+        with_test_paths(
+            "{ models: { mode: 'merge', providers: { one: { apiKey: 'old', extra: 1 } } }, tools: { profile: 'coding' } }",
+            |path| {
+                let before = fs::read_to_string(path).unwrap();
+                assert!(!replace_provider_if_present("missing", json!({"apiKey":"new"})).unwrap());
+                assert_eq!(fs::read_to_string(path).unwrap(), before);
+                assert!(replace_provider_if_present("one", json!({"apiKey":"new","extra":1})).unwrap());
+                let value = read_openclaw_config().unwrap();
+                assert_eq!(value["models"]["mode"], "merge");
+                assert_eq!(value["models"]["providers"]["one"]["apiKey"], "new");
+                assert_eq!(value["tools"]["profile"], "coding");
+            },
+        );
     }
 
     #[test]

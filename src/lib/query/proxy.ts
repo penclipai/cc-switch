@@ -16,6 +16,7 @@ export const proxyKeys = {
   status: ["proxyStatus"] as const,
   takeoverStatus: ["proxyTakeoverStatus"] as const,
   globalConfig: ["globalProxyConfig"] as const,
+  clientHost: ["proxyClientHost"] as const,
   appConfig: (appType: string) => ["appProxyConfig", appType] as const,
 };
 
@@ -66,18 +67,6 @@ export function useAppMode(appType: string, enabled = true) {
 }
 
 /**
- * 直连供应商（路由模式下退出路由时写回的那家）。
- * 放在 ["providers", appId] 前缀下：切换、编辑供应商时随供应商列表一起失效。
- */
-export function useDirectProviderId(appType: string, enabled: boolean) {
-  return useQuery({
-    queryKey: ["providers", appType, "direct"] as const,
-    queryFn: () => proxyApi.getDirectProvider(appType),
-    enabled,
-  });
-}
-
-/**
  * Stack 模型名单。放在 ["providers", appId] 前缀下：编辑、删除供应商时随列表一起失效。
  */
 export function useProxyStack(appType: string, enabled: boolean) {
@@ -119,7 +108,9 @@ export function useSetProxyStackMember() {
     onSuccess: (notice, variables) => {
       toast.success(
         t(
-          variables.appType === "codex"
+          // 这两个客户端只在启动时读配置（Desktop 的模型列表写在配置里）
+          variables.appType === "codex" ||
+            variables.appType === "claude-desktop"
             ? "provider.stackSaved"
             : "provider.stackSavedLive",
           { client: getAppLabel(variables.appType) },
@@ -234,32 +225,6 @@ export function useAcknowledgeCodexStaleClients() {
 
 // ========== 代理服务器控制 Hooks ==========
 
-/**
- * 设置应用接管状态
- */
-export function useSetProxyTakeoverForApp() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: ({
-      appType,
-      enabled,
-      stack = false,
-    }: {
-      appType: string;
-      enabled: boolean;
-      stack?: boolean;
-    }) => proxyApi.setProxyTakeoverForApp(appType, enabled, stack),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus });
-      // 进出路由模式会改「当前」显示的供应商（路由模式下是路由到的那家）。
-      queryClient.invalidateQueries({
-        queryKey: ["providers", variables.appType],
-      });
-    },
-  });
-}
-
 // ========== v3+ 全局/应用级配置 Hooks ==========
 
 /**
@@ -291,6 +256,40 @@ export function useUpdateGlobalProxyConfig() {
       toast.error(
         t("proxy.settings.toast.saveFailed", { error: error.message }),
       );
+    },
+  });
+}
+
+/**
+ * 获取客户端地址
+ */
+export function useProxyClientHost() {
+  return useQuery({
+    queryKey: proxyKeys.clientHost,
+    queryFn: () => proxyApi.getProxyClientHost(),
+  });
+}
+
+/**
+ * 保存客户端地址（后端会重写接上路由的客户端）
+ */
+export function useSetProxyClientHost() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: (host: string) => proxyApi.setProxyClientHost(host),
+    onSuccess: () => {
+      toast.success(t("proxy.settings.toast.saved"), { closeButton: true });
+    },
+    onError: (error: Error) => {
+      toast.error(
+        t("proxy.settings.toast.saveFailed", { error: error.message }),
+      );
+    },
+    // 重写失败时地址也已经存下了，两种情况都刷新
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: proxyKeys.clientHost });
     },
   });
 }

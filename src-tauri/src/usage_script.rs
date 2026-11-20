@@ -4,17 +4,22 @@ use std::collections::HashMap;
 use url::{Host, Url};
 
 use crate::error::AppError;
+use crate::services::api_key_vars::{resolve, unauthorized::CredentialUse};
 
 /// 执行用量查询脚本
 pub async fn execute_usage_script(
     script_code: &str,
-    api_key: &str,
+    raw_api_key: &str,
     base_url: &str,
     timeout_secs: u64,
     access_token: Option<&str>,
     user_id: Option<&str>,
     template_type: Option<&str>,
 ) -> Result<Value, AppError> {
+    let key = resolve::resolve_key_or_empty(raw_api_key);
+    let api_key = key.as_str();
+    let credential_use =
+        CredentialUse::capture(raw_api_key, api_key).filter(|_| script_code.contains("{{apiKey}}"));
     // 检测是否为自定义模板模式
     // 优先使用前端传递的 template_type
     let is_custom_template = template_type.map(|t| t == "custom").unwrap_or(false);
@@ -138,7 +143,10 @@ pub async fn execute_usage_script(
     validate_request_url(&request.url, base_url, is_custom_template)?;
 
     // 6. 发送 HTTP 请求
-    let response_data = send_http_request(&request, timeout_secs).await?;
+    let credential_use = credential_use
+        .as_ref()
+        .filter(|_| request_uses_api_key(&request, api_key));
+    let response_data = send_http_request(&request, timeout_secs, credential_use).await?;
 
     // 7. 在独立作用域中执行 extractor（确保 Runtime/Context 在函数结束前释放）
     let result: Value = {
@@ -243,8 +251,52 @@ struct RequestConfig {
     body: Option<String>,
 }
 
+fn request_uses_api_key(config: &RequestConfig, api_key: &str) -> bool {
+    if api_key.is_empty() {
+        return false;
+    }
+    let matches = |value: &str| {
+        value == api_key || value.split_ascii_whitespace().any(|token| token == api_key)
+    };
+    if config.headers.values().any(|value| matches(value)) {
+        return true;
+    }
+    if Url::parse(&config.url).is_ok_and(|url| {
+        url.query_pairs().any(|(_, value)| value == api_key)
+            || url
+                .path_segments()
+                .is_some_and(|mut parts| parts.any(|value| value == api_key))
+    }) {
+        return true;
+    }
+    let Some(body) = &config.body else {
+        return false;
+    };
+    body == api_key
+        || url::form_urlencoded::parse(body.as_bytes()).any(|(_, value)| value == api_key)
+        || serde_json::from_str::<Value>(body)
+            .is_ok_and(|value| json_contains_key_value(&value, api_key))
+}
+
+fn json_contains_key_value(value: &Value, api_key: &str) -> bool {
+    match value {
+        Value::String(value) => value == api_key,
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_key_value(value, api_key)),
+        Value::Object(fields) => fields
+            .values()
+            .any(|value| json_contains_key_value(value, api_key)),
+        _ => false,
+    }
+}
+
 /// 发送 HTTP 请求
-async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<String, AppError> {
+async fn send_http_request(
+    config: &RequestConfig,
+    timeout_secs: u64,
+    credential_use: Option<&CredentialUse>,
+) -> Result<String, AppError> {
     // 使用全局 HTTP 客户端（已包含代理配置）
     let client = crate::proxy::http_client::get();
     // 约束超时范围，防止异常配置导致长时间阻塞（最小 2 秒，最大 30 秒）
@@ -283,6 +335,11 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
     })?;
 
     let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        if let Some(credential_use) = credential_use {
+            credential_use.signal();
+        }
+    }
     let text = resp.text().await.map_err(|e| {
         AppError::localized(
             "usage_script.read_response_failed",
@@ -290,6 +347,10 @@ async fn send_http_request(config: &RequestConfig, timeout_secs: u64) -> Result<
             format!("Failed to read response: {e}"),
         )
     })?;
+
+    if let Some(credential) = credential_use {
+        credential.observe_json(text.as_bytes());
+    }
 
     if !status.is_success() {
         let preview = if text.len() > 200 {
@@ -724,5 +785,27 @@ mod tests {
             elapsed < std::time::Duration::from_secs(15),
             "interruption took too long: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn detects_the_credential_only_when_the_generated_request_uses_it() {
+        let header_request = RequestConfig {
+            url: "https://api.example.com/v1/usage".into(),
+            method: "GET".into(),
+            headers: HashMap::from([("Authorization".into(), "Bearer key-1".into())]),
+            body: None,
+        };
+        assert!(request_uses_api_key(&header_request, "key-1"));
+        assert!(!request_uses_api_key(&header_request, "key-2"));
+        assert!(!request_uses_api_key(&header_request, "key"));
+
+        let unused_request = RequestConfig {
+            url: "https://api.example.com/v1/usage".into(),
+            method: "GET".into(),
+            headers: HashMap::new(),
+            body: Some(r#"{"query":"usage"}"#.into()),
+        };
+        assert!(!request_uses_api_key(&unused_request, "key-1"));
+        assert!(!request_uses_api_key(&header_request, ""));
     }
 }

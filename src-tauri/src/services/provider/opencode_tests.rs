@@ -3,18 +3,19 @@ use crate::app_config::AppType;
 use crate::database::Database;
 use crate::opencode_config;
 use crate::provider::Provider;
+use crate::services::api_key_vars::runner::{ApiKeyRefreshConfig, ApiKeyRefreshState};
 use crate::settings::{get_settings, update_settings, AppSettings};
 use crate::store::AppState;
+use crate::test_support::EnvVars;
 use serde_json::json;
 use serial_test::serial;
-use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 struct Fixture {
     previous_settings: AppSettings,
-    previous_env: Vec<(&'static str, Option<OsString>)>,
+    _env: EnvVars,
     config_path: PathBuf,
     state: AppState,
     _dir: tempfile::TempDir,
@@ -23,12 +24,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let previous_env = ["CC_SWITCH_TEST_HOME", "OPENCODE_DB"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect();
-        std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
-        std::env::set_var("OPENCODE_DB", dir.path().join("opencode.db"));
+        let env = EnvVars::new()
+            .set("CC_SWITCH_TEST_HOME", dir.path())
+            .set("OPENCODE_DB", dir.path().join("opencode.db"));
         let previous_settings = get_settings();
         let config_dir = dir.path().join("opencode");
         fs::create_dir_all(&config_dir).unwrap();
@@ -39,7 +37,7 @@ impl Fixture {
         .unwrap();
         Self {
             previous_settings,
-            previous_env,
+            _env: env,
             config_path: config_dir.join("opencode.json"),
             state: AppState::new(Arc::new(Database::memory().unwrap())),
             _dir: dir,
@@ -49,7 +47,7 @@ impl Fixture {
     fn imported(&self) -> Provider {
         self.state
             .db
-            .get_provider_by_id("opencode-go", "opencode")
+            .get_provider_by_id("opencode-go", &AppType::OpenCode)
             .unwrap()
             .unwrap()
     }
@@ -59,12 +57,6 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         // Restore the cached settings while writes still target the temporary home.
         update_settings(self.previous_settings.clone()).unwrap();
-        for (key, value) in &self.previous_env {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
     }
 }
 
@@ -104,6 +96,126 @@ fn opencode_builtin_import_is_read_only_and_existing_override_is_editable() {
     assert_eq!(saved["opencode-go"]["options"]["apiKey"], "edited-test-key");
     assert!(saved["opencode-go"].get("npm").is_none());
     assert!(saved["opencode-go"]["options"].get("baseURL").is_none());
+}
+
+#[test]
+#[serial]
+fn opencode_reimport_preserves_wrapper_templates_after_restart() {
+    const KEY_NAME: &str = "ASTRA_OPENCODE_RESTART_KEY";
+    const STALE_NATIVE_VALUE: &str = "stale-native-value";
+    const REFRESHED_VALUE: &str = "refreshed-cache-value";
+
+    let fixture = Fixture::new();
+    let template = format!("{{{{{KEY_NAME}}}}}");
+    let cases = [
+        (
+            "astra-restart-v1",
+            json!({
+                "provider": {
+                    "astra-restart-v1": {"options": {"apiKey": template.clone()}}
+                }
+            }),
+            "/options/apiKey",
+        ),
+        (
+            "astra-restart-v2",
+            json!({
+                "providers": {
+                    "astra-restart-v2": {"settings": {"apiKey": template.clone()}}
+                }
+            }),
+            "/settings/apiKey",
+        ),
+    ];
+
+    // Use the real on-disk test database. The initial process records the
+    // refreshed B value, then exits; loading a second Database is the startup
+    // path that discards cache history containing the old A value.
+    let first_process = AppState::new(Arc::new(Database::init().unwrap()));
+    first_process
+        .db
+        .upsert_api_key_var(
+            None,
+            KEY_NAME,
+            &ApiKeyRefreshConfig {
+                enabled: true,
+                script_dir: fixture._dir.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    first_process
+        .db
+        .update_api_key_var_result(
+            KEY_NAME,
+            Some(STALE_NATIVE_VALUE),
+            &ApiKeyRefreshState::default(),
+        )
+        .unwrap();
+    first_process
+        .db
+        .update_api_key_var_result(
+            KEY_NAME,
+            Some(REFRESHED_VALUE),
+            &ApiKeyRefreshState::default(),
+        )
+        .unwrap();
+    for (id, stored_template, _) in &cases {
+        let provider = Provider::with_id(
+            (*id).into(),
+            format!("Astra {id}"),
+            stored_template.clone(),
+            None,
+        );
+        first_process
+            .db
+            .save_provider(&AppType::OpenCode, &provider)
+            .unwrap();
+    }
+    drop(first_process);
+
+    let stale_native = json!({
+        "provider": {"astra-restart-v1": {"options": {"apiKey": STALE_NATIVE_VALUE}}},
+        "providers": {"astra-restart-v2": {"settings": {"apiKey": STALE_NATIVE_VALUE}}}
+    });
+    let stale_bytes = serde_json::to_vec(&stale_native).unwrap();
+    fs::write(&fixture.config_path, &stale_bytes).unwrap();
+
+    let restarted = AppState::new(Arc::new(Database::init().unwrap()));
+    assert_eq!(restarted.db.load_api_key_var_cache().unwrap(), 1);
+    assert_eq!(
+        crate::services::api_key_vars::resolve::known_values(KEY_NAME),
+        vec![REFRESHED_VALUE]
+    );
+
+    assert_eq!(import_opencode_providers_from_live(&restarted).unwrap(), 2);
+    for (id, _, api_key_path) in &cases {
+        let saved = restarted
+            .db
+            .get_provider_by_id(id, &AppType::OpenCode)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.settings_config.pointer(api_key_path),
+            Some(&serde_json::Value::String(template.clone()))
+        );
+        assert!(!saved
+            .settings_config
+            .to_string()
+            .contains(STALE_NATIVE_VALUE));
+    }
+    // Re-import is read-only: stale native bytes model the durable state left
+    // by an earlier failed propagation before this simulated restart.
+    assert_eq!(fs::read(&fixture.config_path).unwrap(), stale_bytes);
+    let export = restarted.db.export_sql_string().unwrap();
+    assert!(export.contains(&template));
+    assert!(!export.contains(STALE_NATIVE_VALUE));
+    assert!(!export.contains(REFRESHED_VALUE));
+    crate::services::api_key_vars::resolve::cache_load(std::iter::empty::<(
+        String,
+        bool,
+        Option<String>,
+    )>());
 }
 
 #[test]
@@ -161,7 +273,7 @@ fn opencode_builtin_incomplete_copies_cannot_be_added_to_live() {
         let saved = fixture
             .state
             .db
-            .get_provider_by_id(&id, "opencode")
+            .get_provider_by_id(&id, &AppType::OpenCode)
             .unwrap()
             .unwrap();
         assert_eq!(saved.meta.unwrap().live_config_managed, Some(false));
@@ -178,6 +290,30 @@ fn opencode_builtin_incomplete_copies_cannot_be_added_to_live() {
     assert!(opencode_config::get_providers()
         .unwrap()
         .contains_key("custom-copy"));
+}
+
+#[test]
+#[serial]
+fn additive_add_rolls_back_row_when_live_config_cannot_be_parsed() {
+    let fixture = Fixture::new();
+    let broken = "{ \"provider\": ";
+    fs::write(&fixture.config_path, broken).unwrap();
+    let provider = Provider::with_id(
+        "custom-new".into(),
+        "New provider".into(),
+        json!({"npm": "@ai-sdk/openai-compatible", "models": {"glm-5": {"name": "GLM 5"}}}),
+        None,
+    );
+
+    ProviderService::add(&fixture.state, AppType::OpenCode, provider, true).unwrap_err();
+
+    assert!(fixture
+        .state
+        .db
+        .get_provider_by_id("custom-new", &AppType::OpenCode)
+        .unwrap()
+        .is_none());
+    assert_eq!(fs::read_to_string(&fixture.config_path).unwrap(), broken);
 }
 
 #[test]
@@ -220,7 +356,7 @@ fn opencode_builtin_credential_only_import_does_not_create_config() {
     assert!(fixture
         .state
         .db
-        .get_all_providers("opencode")
+        .get_all_providers(&AppType::OpenCode)
         .unwrap()
         .is_empty());
     assert_eq!(fs::read(&db_path).unwrap(), original_db);
@@ -303,7 +439,7 @@ fn opencode_jsonc_provider_and_mcp_workflows_preserve_comments() {
             json!({"type":"http","url":"https://example.com/mcp"}),
         ),
     ] {
-        crate::mcp::sync_single_server_to_opencode(&config, id, &spec).unwrap();
+        crate::mcp::sync_single_server_to_opencode(id, &spec).unwrap();
     }
     let servers = opencode_config::get_mcp_servers().unwrap();
     assert_eq!(servers["existing"]["command"], json!(["npx", "updated"]));

@@ -75,7 +75,8 @@ pub(crate) async fn execute_and_format_usage_result(
 
             let msg = match err {
                 AppError::Localized { zh, en, .. } => {
-                    if lang == "en" {
+                    if lang == "en" || lang == "de" || lang == "tr" || lang == "ko" || lang == "ru"
+                    {
                         en
                     } else {
                         zh
@@ -104,13 +105,13 @@ fn resolve_script_credentials(
     api_key: Option<&str>,
     base_url: Option<&str>,
 ) -> (String, String) {
-    let (provider_base_url, provider_api_key) = provider.resolve_usage_credentials(app_type);
+    let (provider_base_url, provider_raw_api_key) = provider.usage_credential_templates(app_type);
 
-    let api_key = api_key
+    let raw_api_key = api_key
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .unwrap_or(provider_api_key);
+        .unwrap_or(provider_raw_api_key);
 
     let base_url = base_url
         .map(str::trim)
@@ -119,7 +120,10 @@ fn resolve_script_credentials(
         .map(|value| value.trim_end_matches('/').to_owned())
         .unwrap_or(provider_base_url);
 
-    (api_key, base_url)
+    (
+        crate::services::api_key_vars::resolve::resolve_key_or_empty(&raw_api_key),
+        base_url,
+    )
 }
 
 /// Query provider usage (using saved script configuration)
@@ -129,7 +133,7 @@ pub async fn query_usage(
     provider_id: &str,
 ) -> Result<UsageResult, AppError> {
     let (script_code, timeout, api_key, base_url, access_token, user_id, template_type) = {
-        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let providers = state.db.get_all_providers(&app_type)?;
         let provider = providers.get(provider_id).ok_or_else(|| {
             AppError::localized(
                 "provider.not_found",
@@ -202,7 +206,7 @@ pub async fn test_usage_script(
     user_id: Option<&str>,
     template_type: Option<&str>,
 ) -> Result<UsageResult, AppError> {
-    let providers = state.db.get_all_providers(app_type.as_str())?;
+    let providers = state.db.get_all_providers(&app_type)?;
     let provider = providers.get(provider_id).ok_or_else(|| {
         AppError::localized(
             "provider.not_found",

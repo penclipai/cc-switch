@@ -9,6 +9,7 @@
 //! Claude Code 这类外部进程不参与这把锁，「重读比对」和 rename 之间仍有一个极小的
 //! 窗口，外部写入恰好落在里面时仍会被覆盖。
 
+use crate::sync_utils::MutexExt;
 use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
@@ -136,6 +137,16 @@ pub(crate) fn plan_from(
     pre_bytes: Option<Vec<u8>>,
 ) -> Result<Planned, LiveWriteError> {
     let bytes = patch.apply_file(&file.path, pre_bytes.as_deref())?;
+    // 最后一道防线：绝不把字面的 `{{NAME}}` 变量引用写进客户端文件
+    if let Some(name) = crate::services::api_key_vars::resolve::new_literal_ref(
+        pre_bytes.as_deref(),
+        bytes.as_deref(),
+    ) {
+        return Err(LiveWriteError::UnresolvedRef {
+            path: file.path.clone(),
+            name,
+        });
+    }
     Ok(Planned {
         file: file.clone(),
         pre: digest(pre_bytes.as_deref()),
@@ -203,7 +214,7 @@ fn lock_table() -> &'static (Mutex<HashSet<String>>, Condvar) {
 
 pub fn lock_app(app: &str) -> AppWriteGuard {
     let (held, released) = lock_table();
-    let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+    let mut held = held.lock_recover();
     while held.contains(app) {
         held = released.wait(held).unwrap_or_else(|e| e.into_inner());
     }
@@ -216,9 +227,7 @@ pub fn lock_app(app: &str) -> AppWriteGuard {
 impl Drop for AppWriteGuard {
     fn drop(&mut self) {
         let (held, released) = lock_table();
-        held.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.app);
+        held.lock_recover().remove(&self.app);
         released.notify_all();
     }
 }
@@ -256,6 +265,21 @@ mod tests {
             1,
             "no temp files"
         );
+    }
+
+    #[test]
+    fn plan_refuses_literal_variable_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let err = plan(
+            &LiveFile::shared(&path),
+            &set_patch("ANTHROPIC_AUTH_TOKEN", "{{ENGINE_TEST_KEY}}"),
+        )
+        .expect_err("refused");
+        assert!(
+            matches!(err, LiveWriteError::UnresolvedRef { ref name, .. } if name == "ENGINE_TEST_KEY")
+        );
+        assert!(!path.exists());
     }
 
     #[test]

@@ -15,25 +15,8 @@ pub struct GeminiAdapter;
 
 /// OAuth 凭证结构
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct OAuthCredentials {
     pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-}
-
-#[allow(dead_code)]
-impl OAuthCredentials {
-    /// 检查是否需要刷新 token（有 refresh_token 但没有有效的 access_token）
-    pub fn needs_refresh(&self) -> bool {
-        self.refresh_token.is_some() && self.access_token.is_empty()
-    }
-
-    /// 检查是否可以刷新 token
-    pub fn can_refresh(&self) -> bool {
-        self.refresh_token.is_some() && self.client_id.is_some() && self.client_secret.is_some()
-    }
 }
 
 impl GeminiAdapter {
@@ -79,9 +62,6 @@ impl GeminiAdapter {
         if key.starts_with("ya29.") {
             return Some(OAuthCredentials {
                 access_token: key.to_string(),
-                refresh_token: None,
-                client_id: None,
-                client_secret: None,
             });
         }
 
@@ -93,27 +73,12 @@ impl GeminiAdapter {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_default();
-                let refresh_token = json
-                    .get("refresh_token")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let client_id = json
-                    .get("client_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let client_secret = json
-                    .get("client_secret")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                let has_refresh_token =
+                    json.get("refresh_token").and_then(|v| v.as_str()).is_some();
 
                 // 如果有 access_token 或 refresh_token，返回凭证
-                if !access_token.is_empty() || refresh_token.is_some() {
-                    return Some(OAuthCredentials {
-                        access_token,
-                        refresh_token,
-                        client_id,
-                        client_secret,
-                    });
+                if !access_token.is_empty() || has_refresh_token {
+                    return Some(OAuthCredentials { access_token });
                 }
             }
         }
@@ -123,6 +88,13 @@ impl GeminiAdapter {
 
     /// 从 Provider 配置中提取原始 API Key
     fn extract_key_raw(&self, provider: &Provider) -> Option<String> {
+        // `{{NAME}}` 变量引用换成当前值；无法解析时视为没有 Key，绝不发给上游
+        self.extract_key_raw_literal(provider)
+            .and_then(|key| crate::services::api_key_vars::resolve::resolve_key_for_use(&key))
+            .filter(|key| !key.is_empty())
+    }
+
+    fn extract_key_raw_literal(&self, provider: &Provider) -> Option<String> {
         if let Some(env) = provider.settings_config.get("env") {
             // 使用 GEMINI_API_KEY
             if let Some(key) = env
@@ -208,6 +180,10 @@ impl ProviderAdapter for GeminiAdapter {
             }
             _ => Some(AuthInfo::new(key, AuthStrategy::Google)),
         }
+    }
+
+    fn extract_selected_raw_credential(&self, provider: &Provider) -> Option<String> {
+        self.extract_key_raw_literal(provider)
     }
 
     fn build_url(&self, base_url: &str, endpoint: &str) -> String {
@@ -422,7 +398,6 @@ mod tests {
             .parse_oauth_credentials("ya29.test-access-token")
             .unwrap();
         assert_eq!(creds.access_token, "ya29.test-access-token");
-        assert!(creds.refresh_token.is_none());
     }
 
     #[test]
@@ -434,7 +409,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(creds.access_token, "ya29.test");
-        assert_eq!(creds.refresh_token, Some("1//refresh".to_string()));
     }
 
     #[test]

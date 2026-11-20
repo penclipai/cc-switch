@@ -2,7 +2,7 @@ use crate::config::atomic_write;
 use crate::error::AppError;
 use crate::jsonc_document::JsoncDocument;
 use crate::provider::OpenCodeConfigFormat;
-use crate::settings::get_opencode_override_dir;
+use crate::settings::get_override_dir;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ fn canonicalize_plugin_name(plugin_name: &str) -> String {
 }
 
 pub fn get_opencode_dir() -> PathBuf {
-    if let Some(override_dir) = get_opencode_override_dir() {
+    if let Some(override_dir) = get_override_dir(&crate::app_config::AppType::OpenCode) {
         return override_dir;
     }
 
@@ -102,11 +102,6 @@ fn get_opencode_data_dir() -> PathBuf {
         .join(".local")
         .join("share")
         .join("opencode")
-}
-
-#[allow(dead_code)]
-pub fn get_opencode_env_path() -> PathBuf {
-    get_opencode_dir().join(".env")
 }
 
 struct OpenCodeDocument {
@@ -176,7 +171,7 @@ fn try_edit_config(
     resolve_path: impl FnOnce() -> Result<PathBuf, AppError>,
     edit: impl FnOnce(&mut Value) -> Result<(), AppError>,
 ) -> Result<bool, AppError> {
-    let _guard = opencode_config_lock().lock()?;
+    let _guard = crate::sync_utils::lock_file_operation(opencode_config_lock());
     let path = resolve_path()?;
     let mut document = OpenCodeDocument::load(&path)?;
     let mut desired = document.document.value().clone();
@@ -568,6 +563,54 @@ pub fn set_provider_with_format(
     .map(|_| ())
 }
 
+/// Replace only a declaration that still exists in the same OpenCode format.
+/// The membership check is performed under the document lock so a provider
+/// removed by OpenCode after scheduling a refresh is never recreated.
+pub(crate) fn replace_provider_if_present_with_format(
+    id: &str,
+    config: Value,
+    format: OpenCodeConfigFormat,
+) -> Result<bool, AppError> {
+    let _guard = crate::sync_utils::lock_file_operation(opencode_config_lock());
+    let path = get_opencode_config_path()?;
+    let mut document = OpenCodeDocument::load(&path)?;
+    if document.previous_contents.is_none() {
+        return Ok(false);
+    }
+    let mut desired = document.document.value().clone();
+    let key = match format {
+        OpenCodeConfigFormat::V1 => {
+            // A valid native declaration wins over a legacy declaration. Do not
+            // revive or modify the shadowed V1 source during a refresh.
+            if desired
+                .get("providers")
+                .and_then(|providers| providers.get(id))
+                .is_some_and(is_native_provider)
+            {
+                return Ok(false);
+            }
+            "provider"
+        }
+        OpenCodeConfigFormat::V2 => "providers",
+    };
+    let Some(providers) = desired.get_mut(key).and_then(Value::as_object_mut) else {
+        return Ok(false);
+    };
+    if !providers.contains_key(id) {
+        return Ok(false);
+    }
+    if format == OpenCodeConfigFormat::V2 {
+        validate_native_provider(id, &config)?;
+    }
+    providers.insert(id.to_string(), config);
+    if !document.document.apply(&desired)? {
+        // The declaration is present and already matches the refresh payload.
+        return Ok(true);
+    }
+    document.save()?;
+    Ok(true)
+}
+
 pub fn remove_provider(id: &str) -> Result<(), AppError> {
     edit_config(get_opencode_config_path, |config| {
         let removed_legacy = config
@@ -581,6 +624,31 @@ pub fn remove_provider(id: &str) -> Result<(), AppError> {
                 providers.remove(id);
             }
         }
+    })
+    .map(|_| ())
+}
+
+/// Top-level `model` (`"<provider>/<model>"`): the model OpenCode starts with.
+pub fn get_default_model() -> Result<Option<String>, AppError> {
+    Ok(read_opencode_config()?
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
+/// Only rewrites the top-level `model`; `small_model` and everything else stay as is.
+pub fn set_default_model(model: &str) -> Result<(), AppError> {
+    let model = model.trim();
+    if !model
+        .split_once('/')
+        .is_some_and(|(provider, id)| !provider.is_empty() && !id.is_empty())
+    {
+        return Err(AppError::InvalidInput(format!(
+            "OpenCode model must be \"<provider>/<model>\": {model}"
+        )));
+    }
+    edit_config(get_opencode_config_path, |config| {
+        config["model"] = json!(model);
     })
     .map(|_| ())
 }
@@ -678,25 +746,66 @@ fn remove_plugins(config: &mut Value, prefixes: &[&str]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[serial_test::serial]
+    fn config_edits_recover_after_poison() {
+        if !crate::sync_utils::in_isolated_process(
+            "opencode_config::tests::config_edits_recover_after_poison",
+        ) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("opencode.json");
+        std::fs::write(&path, r#"{"model":"original"}"#).unwrap();
+        assert!(std::panic::catch_unwind(|| {
+            let _ = super::edit_config(
+                || Ok(path.clone()),
+                |value| {
+                    value["model"] = serde_json::json!("unfinished");
+                    panic!("config edit interrupted");
+                },
+            );
+        })
+        .is_err());
+        assert_eq!(
+            super::read_opencode_config_from_path(&path).unwrap()["model"],
+            "original"
+        );
+        super::edit_config(
+            || Ok(path.clone()),
+            |value| {
+                value["model"] = serde_json::json!("recovered");
+            },
+        )
+        .expect("write after panic");
+        assert_eq!(
+            super::read_opencode_config_from_path(&path).unwrap()["model"],
+            "recovered"
+        );
+        assert!(!super::opencode_config_lock().is_poisoned());
+    }
     use super::*;
+    use crate::test_support::EnvVars;
 
-    struct TestHomeGuard(Option<std::ffi::OsString>, crate::settings::AppSettings);
+    /// Restores the previous settings before the previous home comes back.
+    struct TestHomeGuard {
+        settings: crate::settings::AppSettings,
+        _env: EnvVars,
+    }
     impl TestHomeGuard {
         fn set(home: &std::path::Path) -> Self {
-            let previous_env = std::env::var_os("CC_SWITCH_TEST_HOME");
-            std::env::set_var("CC_SWITCH_TEST_HOME", home);
-            let guard = Self(previous_env, crate::settings::get_settings());
+            let env = EnvVars::new().set("CC_SWITCH_TEST_HOME", home);
+            let guard = Self {
+                settings: crate::settings::get_settings(),
+                _env: env,
+            };
             crate::settings::update_settings(Default::default()).unwrap();
             guard
         }
     }
     impl Drop for TestHomeGuard {
         fn drop(&mut self) {
-            crate::settings::update_settings(self.1.clone()).unwrap();
-            match self.0.take() {
-                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-            }
+            crate::settings::update_settings(self.settings.clone()).unwrap();
         }
     }
 
@@ -704,6 +813,49 @@ mod tests {
         let dir = home.join(".config").join("opencode");
         std::fs::create_dir_all(&dir).expect("create config dir");
         std::fs::write(dir.join("opencode.json"), content).expect("write config");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn replace_if_present_preserves_absent_document_and_updates_matching_format() {
+        let home = tempfile::tempdir().unwrap();
+        let _guard = TestHomeGuard::set(home.path());
+        write_config(
+            home.path(),
+            r#"{"provider":{"one":{"apiKey":"old","extra":1}},"providers":{"two":{"package":"x"}}}"#,
+        );
+        let path = get_opencode_config_path().unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(!replace_provider_if_present_with_format(
+            "missing",
+            json!({"apiKey":"new"}),
+            OpenCodeConfigFormat::V1
+        )
+        .unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(replace_provider_if_present_with_format(
+            "one",
+            json!({"apiKey":"new","extra":1}),
+            OpenCodeConfigFormat::V1
+        )
+        .unwrap());
+        assert_eq!(
+            read_opencode_config().unwrap()["provider"]["one"]["apiKey"],
+            "new"
+        );
+        assert!(replace_provider_if_present_with_format(
+            "one",
+            json!({"apiKey":"new","extra":1}),
+            OpenCodeConfigFormat::V1
+        )
+        .unwrap());
+        // V1 refresh must not write a foreign V2 declaration.
+        assert!(!replace_provider_if_present_with_format(
+            "two",
+            json!({"apiKey":"new"}),
+            OpenCodeConfigFormat::V1
+        )
+        .unwrap());
     }
 
     #[test]
@@ -1115,6 +1267,36 @@ mod tests {
         assert_eq!(
             config["model"], "keep-me",
             "unrelated user config must be preserved"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn set_default_model_only_touches_top_level_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = TestHomeGuard::set(temp.path());
+
+        write_config(
+            temp.path(),
+            "{\n  // keep me\n  \"model\": \"old/a\",\n  \"small_model\": \"old/b\"\n}\n",
+        );
+        assert_eq!(get_default_model().unwrap().as_deref(), Some("old/a"));
+
+        set_default_model("relay/vendor/model-x").expect("set must succeed");
+
+        let path = get_opencode_config_path().unwrap();
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(source.contains("// keep me"), "comments must survive");
+        let config = read_opencode_config().unwrap();
+        assert_eq!(config["model"], "relay/vendor/model-x");
+        assert_eq!(config["small_model"], "old/b");
+
+        for invalid in ["", "no-slash", "/model", "provider/"] {
+            assert!(set_default_model(invalid).is_err(), "{invalid:?}");
+        }
+        assert_eq!(
+            read_opencode_config().unwrap()["model"],
+            "relay/vendor/model-x"
         );
     }
 
