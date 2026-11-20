@@ -1,13 +1,10 @@
 //! API Key 变量命令（设置页「API Key 变量」与供应商表单的引用校验）
 
-use std::str::FromStr;
-
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::app_config::AppType;
 use crate::services::api_key_vars::{
-    self, ApiKeyVarInput, ApiKeyVarView, RefCheck, RefreshOutcome, RefreshReason, ResolvedScript,
+    self, ApiKeyVarInput, ApiKeyVarView, RefreshOutcome, RefreshReason, ResolvedScript,
     TestOutcome,
 };
 use crate::store::AppState;
@@ -84,24 +81,4 @@ pub async fn refresh_api_key_var(app: AppHandle, name: String) -> Result<Refresh
     api_key_vars::refresh_var(&app, &name, RefreshReason::Manual)
         .await
         .map_err(|e| e.to_string())
-}
-
-/// 检查一个 Key 输入值（`{{NAME}}`）的解析状态；不是引用时返回 None
-#[tauri::command]
-pub fn check_api_key_ref(
-    state: State<'_, AppState>,
-    value: String,
-) -> Result<Option<RefCheck>, String> {
-    api_key_vars::check_value(&state.db, &value).map_err(|e| e.to_string())
-}
-
-/// 检查一份供应商配置中所有 Key 字段的引用
-#[tauri::command(rename_all = "camelCase")]
-pub fn check_api_key_refs(
-    state: State<'_, AppState>,
-    app: String,
-    settings_config: serde_json::Value,
-) -> Result<Vec<RefCheck>, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    api_key_vars::check_refs(&state.db, &app_type, &settings_config).map_err(|e| e.to_string())
 }

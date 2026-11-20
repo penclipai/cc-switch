@@ -574,6 +574,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn rename_rewrites_provider_and_universal_templates_atomically() -> Result<(), AppError> {
         let db = Database::memory()?;
         db.upsert_api_key_var(None, "DAO_T_RENAME_OLD", &cfg("/old", true))?;
@@ -622,6 +623,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn rename_rolls_back_when_provider_rewrite_fails() -> Result<(), AppError> {
         let db = Database::memory()?;
         db.upsert_api_key_var(None, "DAO_T_PROVIDER_ABORT_OLD", &cfg("/old", true))?;
@@ -663,6 +665,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn rename_rolls_back_when_universal_rewrite_fails() -> Result<(), AppError> {
         let db = Database::memory()?;
         db.upsert_api_key_var(None, "DAO_T_UNIVERSAL_ABORT_OLD", &cfg("/old", true))?;
@@ -705,6 +708,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn guarded_delete_rechecks_provider_and_universal_references() -> Result<(), AppError> {
         let db = Database::memory()?;
         db.upsert_api_key_var(None, "DAO_T_DELETE_GUARD", &cfg("/delete", true))?;
@@ -728,6 +732,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn guarded_delete_keeps_cache_when_database_delete_rolls_back() -> Result<(), AppError> {
         let db = Database::memory()?;
         db.upsert_api_key_var(None, "DAO_T_DELETE_ABORT", &cfg("/delete", true))?;
@@ -760,6 +765,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn crud_and_cache() -> Result<(), AppError> {
         let db = Database::memory()?;
         db.upsert_api_key_var(None, "DAO_T_ONE", &cfg("/a", true))?;
@@ -823,6 +829,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn retry_count_is_persisted_and_clamped() -> Result<(), AppError> {
         let db = Database::memory()?;
         let config = ApiKeyRefreshConfig {
@@ -841,6 +848,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn changing_script_discards_old_schedule_but_keeps_the_last_key_and_expiry(
     ) -> Result<(), AppError> {
         let db = Database::memory()?;
@@ -872,6 +880,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn renaming_without_changing_script_keeps_a_successful_schedule() -> Result<(), AppError> {
         let db = Database::memory()?;
         db.upsert_api_key_var(None, "DAO_T_RENAME_SCHEDULE", &cfg("/same-script", true))?;
@@ -897,6 +906,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn conditional_refresh_result_rejects_edited_or_recreated_records() -> Result<(), AppError> {
         let db = Database::memory()?;
         db.upsert_api_key_var(None, "DAO_T_GENERATION", &cfg("/original", true))?;

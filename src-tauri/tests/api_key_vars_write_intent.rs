@@ -14,7 +14,7 @@ use cc_switch_lib::{
     AppType, EditorSave, Provider, ProviderMeta, ProviderService,
 };
 
-#[path = "support/mod.rs"]
+#[path = "integration/support/mod.rs"]
 mod support;
 use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
 
@@ -79,7 +79,7 @@ fn claude(id: &str, key: &str) -> Provider {
 fn child_key(state: &cc_switch_lib::AppState, app: AppType, id: &str) -> String {
     let row = state
         .db
-        .get_provider_by_id(id, app.as_str())
+        .get_provider_by_id(id, &app)
         .expect("read generated child")
         .expect("generated child exists");
     match app {
@@ -126,7 +126,7 @@ fn editor_rejects_disabled_reference_without_mutating_existing_row() {
 
     let before = state
         .db
-        .get_provider_by_id(&initial.id, AppType::Claude.as_str())
+        .get_provider_by_id(&initial.id, &AppType::Claude)
         .expect("read original")
         .expect("original exists");
     let base = ProviderService::editor_view(&state, AppType::Claude, &before.settings_config, None)
@@ -157,7 +157,7 @@ fn editor_rejects_disabled_reference_without_mutating_existing_row() {
 
     let after = state
         .db
-        .get_provider_by_id(&before.id, AppType::Claude.as_str())
+        .get_provider_by_id(&before.id, &AppType::Claude)
         .expect("read restored row")
         .expect("restored row exists");
     assert_eq!(after.settings_config, before.settings_config);
@@ -196,7 +196,7 @@ fn editor_file_failure_restores_full_row_after_valid_variable_write() {
     .expect("add current Claude provider");
     let before = state
         .db
-        .get_provider_by_id(&initial.id, AppType::Claude.as_str())
+        .get_provider_by_id(&initial.id, &AppType::Claude)
         .expect("read original")
         .expect("original exists");
     let base = ProviderService::editor_view(&state, AppType::Claude, &before.settings_config, None)
@@ -232,7 +232,7 @@ fn editor_file_failure_restores_full_row_after_valid_variable_write() {
 
     let after = state
         .db
-        .get_provider_by_id(&before.id, AppType::Claude.as_str())
+        .get_provider_by_id(&before.id, &AppType::Claude)
         .expect("read restored row")
         .expect("restored row exists");
     assert_eq!(after.settings_config, before.settings_config);
@@ -270,7 +270,9 @@ fn universal_explicit_literal_detaches_old_template_in_all_children() {
         .expect("construct universal provider from its public JSON shape"),
     )
     .expect("save template parent");
-    let mut universal = ProviderService::get_universal(&state, "explicit-literal")
+    let mut universal = state
+        .db
+        .get_universal_provider("explicit-literal")
         .expect("read template parent")
         .expect("template parent exists");
     ProviderService::sync_universal_to_apps(&state, &universal.id).expect("create children");

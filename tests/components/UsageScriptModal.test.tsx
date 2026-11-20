@@ -8,16 +8,13 @@ import {
 import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-
+import { QueryClientProvider } from "@tanstack/react-query";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import type { Provider, UsageScript } from "@/types";
+import { createTestQueryClient } from "../utils/testQueryClient";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
-}));
-
-vi.mock("@tanstack/react-query", () => ({
-  useQueryClient: () => ({ invalidateQueries: vi.fn() }),
 }));
 
 vi.mock("@/lib/query", () => ({
@@ -78,18 +75,21 @@ function renderModal(
   usageScript?: UsageScript,
   onClose = vi.fn(),
 ) {
+  const client = createTestQueryClient();
   render(
-    <UsageScriptModal
-      provider={
-        usageScript
-          ? { ...provider, meta: { usage_script: usageScript } }
-          : provider
-      }
-      appId="claude"
-      isOpen
-      onClose={onClose}
-      onSave={onSave}
-    />,
+    <QueryClientProvider client={client}>
+      <UsageScriptModal
+        provider={
+          usageScript
+            ? { ...provider, meta: { usage_script: usageScript } }
+            : provider
+        }
+        appId="claude"
+        isOpen
+        onClose={onClose}
+        onSave={onSave}
+      />
+    </QueryClientProvider>,
   );
 
   return onClose;
@@ -185,27 +185,30 @@ describe("UsageScriptModal", () => {
 describe("UsageScriptModal official subscription hint", () => {
   // agy 的额度靠它自己的 /usage 命令查，不读登录凭据
   it("explains Antigravity's quota check instead of reading OAuth credentials", () => {
+    const client = createTestQueryClient();
     render(
-      <UsageScriptModal
-        provider={{
-          id: "agy-official",
-          name: "Google Official",
-          category: "official",
-          settingsConfig: { env: {}, config: {} },
-          meta: {
-            usage_script: {
-              enabled: true,
-              language: "javascript",
-              code: "",
-              templateType: "official_subscription",
+      <QueryClientProvider client={client}>
+        <UsageScriptModal
+          provider={{
+            id: "agy-official",
+            name: "Google Official",
+            category: "official",
+            settingsConfig: { env: {}, config: {} },
+            meta: {
+              usage_script: {
+                enabled: true,
+                language: "javascript",
+                code: "",
+                templateType: "official_subscription",
+              },
             },
-          },
-        }}
-        appId="agy"
-        isOpen
-        onClose={() => {}}
-        onSave={vi.fn()}
-      />,
+          }}
+          appId="agy"
+          isOpen
+          onClose={() => {}}
+          onSave={vi.fn()}
+        />
+      </QueryClientProvider>,
     );
     expect(
       screen.getByText("usageScript.officialSubscriptionHintAgy"),
@@ -220,26 +223,29 @@ describe("UsageScriptModal Claude official card bound to an account", () => {
   // 卡片和托盘在没保存开关时默认查这个号的额度，配置页也要显示为已开
   it("shows usage enabled by default when nothing was saved", async () => {
     const onSave = vi.fn();
+    const client = createTestQueryClient();
     render(
-      <UsageScriptModal
-        provider={{
-          id: "claude-bound",
-          name: "Claude Official",
-          category: "official",
-          settingsConfig: { env: {} },
-          meta: {
-            authBinding: {
-              source: "managed_account",
-              authProvider: "claude_official",
-              accountId: "acct-1",
+      <QueryClientProvider client={client}>
+        <UsageScriptModal
+          provider={{
+            id: "claude-bound",
+            name: "Claude Official",
+            category: "official",
+            settingsConfig: { env: {} },
+            meta: {
+              authBinding: {
+                source: "managed_account",
+                authProvider: "claude_official",
+                accountId: "acct-1",
+              },
             },
-          },
-        }}
-        appId="claude"
-        isOpen
-        onClose={() => {}}
-        onSave={onSave}
-      />,
+          }}
+          appId="claude"
+          isOpen
+          onClose={() => {}}
+          onSave={onSave}
+        />
+      </QueryClientProvider>,
     );
 
     await userEvent.click(
@@ -266,24 +272,27 @@ describe("UsageScriptModal Oh My Pi credentials", () => {
       subscriptionApi: { getBalance },
     }));
     const { default: Modal } = await import("@/components/UsageScriptModal");
+    const client = createTestQueryClient();
     render(
-      <Modal
-        provider={{
-          id: "cc-switch-demo",
-          name: "Demo",
-          // A base URL the balance template recognises, so the test reaches
-          // `getBalance` instead of stopping at the template picker.
-          settingsConfig: {
-            baseUrl: "https://api.deepseek.com/v1",
-            apiKey: "sk-omp",
-            api: "openai-completions",
-          },
-        }}
-        appId="omp"
-        isOpen
-        onClose={() => {}}
-        onSave={() => {}}
-      />,
+      <QueryClientProvider client={client}>
+        <Modal
+          provider={{
+            id: "cc-switch-demo",
+            name: "Demo",
+            // A base URL the balance template recognises, so the test reaches
+            // `getBalance` instead of stopping at the template picker.
+            settingsConfig: {
+              baseUrl: "https://api.deepseek.com/v1",
+              apiKey: "sk-omp",
+              api: "openai-completions",
+            },
+          }}
+          appId="omp"
+          isOpen
+          onClose={() => {}}
+          onSave={() => {}}
+        />
+      </QueryClientProvider>,
     );
 
     // The usage query is off by default; enabling it asks for confirmation once.
@@ -324,14 +333,17 @@ describe("UsageScriptModal DeepSeek Harness credentials", () => {
   };
 
   function renderDshModal() {
+    const client = createTestQueryClient();
     render(
-      <UsageScriptModal
-        provider={dshProvider}
-        appId="dsh"
-        isOpen
-        onClose={() => {}}
-        onSave={() => {}}
-      />,
+      <QueryClientProvider client={client}>
+        <UsageScriptModal
+          provider={dshProvider}
+          appId="dsh"
+          isOpen
+          onClose={() => {}}
+          onSave={() => {}}
+        />
+      </QueryClientProvider>,
     );
   }
 
@@ -383,6 +395,68 @@ describe("UsageScriptModal DeepSeek Harness credentials", () => {
   });
 });
 
+describe("UsageScriptModal WorkBuddy credentials", () => {
+  const workbuddyProvider: Provider = {
+    id: "workbuddy-deepseek",
+    name: "DeepSeek",
+    settingsConfig: {
+      models: [
+        {
+          id: "deepseek-chat",
+          url: "https://api.deepseek.com/v1/chat/completions",
+          apiKey: "sk-test-workbuddy",
+        },
+      ],
+    },
+    meta: {
+      usage_script: {
+        enabled: true,
+        language: "javascript",
+        code: "",
+      },
+    },
+  };
+
+  it("passes the model's key and endpoint without /chat/completions to the balance test", async () => {
+    const { subscriptionApi } = await import("@/lib/api/subscription");
+    const getBalance = vi
+      .spyOn(subscriptionApi, "getBalance")
+      .mockResolvedValue({
+        success: true,
+        data: [{ isValid: true, remaining: 1, unit: "CNY" }],
+      });
+
+    try {
+      const client = createTestQueryClient();
+      render(
+        <QueryClientProvider client={client}>
+          <UsageScriptModal
+            provider={workbuddyProvider}
+            appId="workbuddy"
+            isOpen
+            onClose={() => {}}
+            onSave={() => {}}
+          />
+        </QueryClientProvider>,
+      );
+      expect(screen.getByText("usageScript.balanceHint")).toBeInTheDocument();
+      await userEvent.click(
+        screen.getByRole("button", { name: "usageScript.templateBalance" }),
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "usageScript.testScript" }),
+      );
+
+      expect(getBalance).toHaveBeenCalledWith(
+        "https://api.deepseek.com/v1",
+        "sk-test-workbuddy",
+      );
+    } finally {
+      getBalance.mockRestore();
+    }
+  });
+});
+
 describe.each([
   {
     appId: "mcode" as const,
@@ -412,25 +486,28 @@ describe.each([
   "UsageScriptModal $appId credentials",
   ({ appId, settingsConfig, apiKey }) => {
     function renderAppModal() {
+      const client = createTestQueryClient();
       render(
-        <UsageScriptModal
-          provider={{
-            id: `deepseek-${appId}`,
-            name: "DeepSeek",
-            settingsConfig,
-            meta: {
-              usage_script: {
-                enabled: true,
-                language: "javascript",
-                code: "",
+        <QueryClientProvider client={client}>
+          <UsageScriptModal
+            provider={{
+              id: `deepseek-${appId}`,
+              name: "DeepSeek",
+              settingsConfig,
+              meta: {
+                usage_script: {
+                  enabled: true,
+                  language: "javascript",
+                  code: "",
+                },
               },
-            },
-          }}
-          appId={appId}
-          isOpen
-          onClose={() => {}}
-          onSave={() => {}}
-        />,
+            }}
+            appId={appId}
+            isOpen
+            onClose={() => {}}
+            onSave={() => {}}
+          />
+        </QueryClientProvider>,
       );
     }
 

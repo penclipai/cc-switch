@@ -72,7 +72,12 @@ pub fn supports_app(app: &AppType) -> bool {
         | AppType::Hermes
         | AppType::Pi
         | AppType::Mcode => true,
-        AppType::Agy | AppType::Kimi | AppType::Dsh | AppType::Omp | AppType::Copilot => false,
+        AppType::Agy
+        | AppType::Kimi
+        | AppType::Dsh
+        | AppType::Omp
+        | AppType::Copilot
+        | AppType::WorkBuddy => false,
     }
 }
 
@@ -716,6 +721,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn codex_top_level_token_uses_the_same_reference_lifecycle() {
         cache_set("TOP_TOKEN_REF", true, Some("top-token-value"));
         let input = json!({"config": "experimental_bearer_token = '{{TOP_TOKEN_REF}}' # keep\n"});
@@ -757,6 +763,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn auth_containers_keep_native_credentials_except_codex_static_key() {
         let input = json!({
             "auth": {"OPENAI_API_KEY":"{{AUTH_STATIC_KEY}}", "apiKey":"{{KEEP}}"},
@@ -801,6 +808,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn resolve_per_app() {
         cache_set("RT_CLAUDE", true, Some("sk-claude"));
         cache_set("RT_CODEX", true, Some("sk-codex"));
@@ -845,6 +853,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn unresolvable_refs_error() {
         cache_set("RT_DISABLED", false, Some("v"));
         cache_set("RT_NOVALUE", true, None);
@@ -886,6 +895,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn preserve_refs_restores_template() {
         cache_set("RT_PRESERVE", true, Some("sk-old-value"));
         cache_set("RT_PRESERVE", true, Some("sk-new-value"));
@@ -906,6 +916,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn stored_template_readback_does_not_depend_on_cache_history() {
         cache_load([(
             String::from("RT_STORED"),
@@ -953,6 +964,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn all_apps_and_nested_api_key_locations() {
         cache_set("RT_ALL_APPS", true, Some("sk-all"));
         assert_eq!(supported_apps().count(), 10);
@@ -1039,6 +1051,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn codex_toml_and_malformed_recognized_keys_are_strict() {
         cache_set("RT_TOML", true, Some("sk-toml"));
         let settings = json!({"config": "experimental_bearer_token = \"{{RT_TOML}}\"\n[model_providers.foo]\nexperimental_bearer_token = \"{{RT_TOML}}\" # keep\n"});

@@ -109,7 +109,9 @@ pub async fn fetch_models(
             .strip_suffix("/v1beta")
             .or_else(|| base.strip_suffix("/v1"))
             .unwrap_or(base);
-        vec![format!("{base}/v1beta/models")]
+        // 默认每页只回 50 个（Gemini / Gemma / Imagen / Veo 加起来早已超出），
+        // 这里不翻页，直接要最大页。
+        vec![format!("{base}/v1beta/models?pageSize=1000")]
     } else {
         build_models_url_candidates(base_url, is_full_url, models_url_override)?
     };
@@ -268,6 +270,13 @@ fn build_model_fetch_headers(
         }
     }
 
+    // 兜底 User-Agent：reqwest 默认不发 UA，而前置 Cloudflare/WAF 的端点对
+    // 无 UA 请求一律 403，且会被前端误读成「API Key 无效」（#7427）。
+    // 供应商自定义 UA 与请求头里的 UA 都在上面 insert 过，优先级高于兜底。
+    headers
+        .entry(USER_AGENT)
+        .or_insert_with(|| HeaderValue::from_static("cc-switch"));
+
     Ok(headers)
 }
 
@@ -411,6 +420,33 @@ mod tests {
     }
 
     #[test]
+    fn model_fetch_headers_default_user_agent_when_unset() {
+        // #7427：无 User-Agent 的请求会被前置 Cloudflare/WAF 的端点一律 403，
+        // 且被前端误读成「API Key 无效」。未配置任何 UA 时补默认值。
+        let headers = build_model_fetch_headers("key", None, None, None).unwrap();
+        assert_eq!(headers[USER_AGENT], "cc-switch");
+
+        // 纯请求头鉴权（无 api_key）同样要带默认 UA。
+        let header_only = BTreeMap::from([("Authorization".to_string(), "Token x".to_string())]);
+        let headers = build_model_fetch_headers("", None, None, Some(&header_only)).unwrap();
+        assert_eq!(headers[USER_AGENT], "cc-switch");
+    }
+
+    #[test]
+    fn model_fetch_headers_keep_explicit_user_agent_priority() {
+        // 供应商自定义 UA 优先于默认值；请求头里的 UA 优先于两者。
+        let custom = HeaderValue::from_str("my-agent/1.0").unwrap();
+        let headers = build_model_fetch_headers("key", None, Some(&custom), None).unwrap();
+        assert_eq!(headers[USER_AGENT], "my-agent/1.0");
+
+        let request_headers =
+            BTreeMap::from([("User-Agent".to_string(), "header-agent/2.0".to_string())]);
+        let headers =
+            build_model_fetch_headers("key", None, Some(&custom), Some(&request_headers)).unwrap();
+        assert_eq!(headers[USER_AGENT], "header-agent/2.0");
+    }
+
+    #[test]
     fn model_fetch_headers_allow_validated_header_only_auth_and_overrides() {
         let custom = BTreeMap::from([
             ("Authorization".to_string(), "Token literal".to_string()),
@@ -466,6 +502,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn loopback_unauthorized_response_keeps_the_model_fetch_error() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();

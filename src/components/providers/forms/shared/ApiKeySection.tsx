@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import ApiKeyInput from "../ApiKeyInput";
 import type { ProviderCategory } from "@/types";
@@ -21,6 +22,8 @@ interface ApiKeySectionProps {
   partnerPromotionKey?: string;
   /** 允许 `{{NAME}}` 引用 API Key 变量 */
   allowVarRef?: boolean;
+  /** 输入框下方的说明；有推广语时让位给推广语 */
+  hint?: ReactNode;
 }
 
 export function ApiKeySection({
@@ -36,6 +39,7 @@ export function ApiKeySection({
   required = false,
   partnerPromotionKey,
   allowVarRef = true,
+  hint,
 }: ApiKeySectionProps) {
   const { t } = useTranslation();
 
@@ -91,7 +95,7 @@ export function ApiKeySection({
           </a>
         ) : null
       }
-      hint={promotion || undefined}
+      hint={promotion || hint || undefined}
     />
   );
 }

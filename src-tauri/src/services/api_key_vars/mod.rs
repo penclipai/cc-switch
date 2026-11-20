@@ -184,7 +184,7 @@ fn current_provider_id(db: &Database, app: &AppType) -> Option<String> {
 pub fn all_references(db: &Database) -> Result<HashMap<String, Vec<VarReference>>, AppError> {
     let mut out: HashMap<String, Vec<VarReference>> = HashMap::new();
     for app in resolve::supported_apps() {
-        let providers = db.get_all_providers(app.as_str())?;
+        let providers = db.get_all_providers(&app)?;
         let current = current_provider_id(db, &app);
         for provider in providers.values() {
             for name in resolve::referenced_vars(&app, &provider.settings_config) {
@@ -427,7 +427,7 @@ pub fn reconcile_cached_values(state: &AppState) -> Result<Vec<String>, AppError
     let mut updated = 0usize;
 
     for app in resolve::supported_apps() {
-        let providers = match state.db.get_all_providers(app.as_str()) {
+        let providers = match state.db.get_all_providers(&app) {
             Ok(providers) => providers,
             Err(error) => {
                 let message = format!("{}: {error}", app.as_str());
@@ -588,7 +588,7 @@ pub fn propagate(state: &AppState, name: &str) -> (Vec<VarReference>, Vec<String
     let mut updated = Vec::new();
     let mut errors = Vec::new();
     for app in resolve::supported_apps() {
-        let providers = match state.db.get_all_providers(app.as_str()) {
+        let providers = match state.db.get_all_providers(&app) {
             Ok(providers) => providers,
             Err(error) => {
                 errors.push(format!("{}: {error}", app.as_str()));
@@ -853,7 +853,7 @@ pub async fn refresh_before_switch(
         .ok_or_else(|| AppError::Message("应用状态不可用".to_string()))?;
     let provider = state
         .db
-        .get_provider_by_id(id, app_type.as_str())?
+        .get_provider_by_id(id, app_type)?
         .ok_or_else(|| AppError::InvalidInput(format!("供应商 {id} 不存在")))?;
     let names = resolve::referenced_vars(app_type, &provider.settings_config);
     let mut warnings = Vec::new();
@@ -875,7 +875,7 @@ pub async fn refresh_before_switch(
     }
     let provider = state
         .db
-        .get_provider_by_id(id, app_type.as_str())?
+        .get_provider_by_id(id, app_type)?
         .ok_or_else(|| AppError::InvalidInput(format!("供应商 {id} 不存在")))?;
     ensure_provider_switchable(&state.db, app_type, &provider.settings_config)?;
     Ok((!warnings.is_empty()).then(|| warnings.join("; ")))
@@ -1361,6 +1361,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn scheduler_waits_for_nearest_idle_due_and_never_spins_on_in_flight_work() {
         let db = Database::memory().unwrap();
         let config = ApiKeyRefreshConfig {
@@ -1403,6 +1404,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn scheduler_dispatches_a_variable_when_its_nearest_due_time_arrives() {
         let db = Database::memory().unwrap();
         let config = ApiKeyRefreshConfig {
@@ -1452,6 +1454,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn script_messages_are_redacted_before_storage_and_view_serialization() {
         let home = tempdir().unwrap();
         let _home_guard = TestHomeGuard::set(home.path());
@@ -1503,6 +1506,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn changing_scripts_keeps_unexpired_cached_value_available_after_failure() {
         let home = tempdir().unwrap();
         let _home_guard = TestHomeGuard::set(home.path());
@@ -1549,6 +1553,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn success_and_legacy_messages_redact_older_retained_values() {
         let home = tempdir().unwrap();
         let _home_guard = TestHomeGuard::set(home.path());
@@ -1616,6 +1621,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn due_vars_respects_enabled_and_state() -> Result<(), AppError> {
         let db = Database::memory()?;
         let cfg = |enabled| ApiKeyRefreshConfig {
@@ -1644,6 +1650,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn stale_script_results_do_not_commit_after_variable_changes() -> Result<(), AppError> {
         let state = AppState::new(Arc::new(Database::memory()?));
         let cfg = |enabled, script_dir: &str| ApiKeyRefreshConfig {
@@ -1727,6 +1734,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn running_script_result_is_discarded_after_configuration_change() -> Result<(), AppError>
     {
         let script_dir = tempdir().map_err(|error| AppError::Message(error.to_string()))?;
@@ -1833,7 +1841,7 @@ process.stdout.write(JSON.stringify({ apiKey: "old-script-key" }));"#,
                 );
             let db = Arc::new(Database::memory()?);
             db.migrate_from_json(&config)?;
-            db.set_current_provider(AppType::Claude.as_str(), "merged-claude")?;
+            db.set_current_provider(&AppType::Claude, "merged-claude")?;
             let state = AppState::new(db);
             let cfg = ApiKeyRefreshConfig {
                 enabled: true,

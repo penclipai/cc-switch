@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Download, Loader2 } from "lucide-react";
 import { useApiKeyVarTemplate } from "@/lib/query/apiKeyVars";
@@ -10,7 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PageTabs } from "@/components/ui/page-tabs";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
 const ENV_NAMES = [
@@ -23,6 +24,7 @@ const ENV_NAMES = [
 /** 折叠说明和配置弹窗复用同一内容，代码与下载包共用后端文件清单。 */
 export function ApiKeyVarTemplateGuide() {
   const { t } = useTranslation();
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const {
     data: files,
     isPending,
@@ -30,6 +32,10 @@ export function ApiKeyVarTemplateGuide() {
     error,
     refetch,
   } = useApiKeyVarTemplate();
+  const activePath = files?.some((file) => file.path === selectedPath)
+    ? selectedPath!
+    : (files?.[0]?.path ?? "");
+  const activeFile = files?.find((file) => file.path === activePath);
 
   return (
     <div className="min-w-0 space-y-5 text-body text-fg-2">
@@ -98,31 +104,37 @@ export function ApiKeyVarTemplateGuide() {
             </Button>
           </div>
         ) : files?.length ? (
-          <Tabs defaultValue={files[0].path} className="min-w-0">
+          <div className="min-w-0">
             <div className="overflow-x-auto">
-              <TabsList
-                className="w-max justify-start"
+              <PageTabs
+                items={files.map((file) => ({
+                  value: file.path,
+                  label: (
+                    <span className="font-mono text-caption">{file.path}</span>
+                  ),
+                }))}
+                value={activePath}
+                onValueChange={setSelectedPath}
                 aria-label={t("apiKeyVars.template.filesTitle")}
-              >
-                {files.map((file) => (
-                  <TabsTrigger
-                    key={file.path}
-                    value={file.path}
-                    className="min-w-0 font-mono text-caption"
-                  >
-                    {file.path}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
+                idPrefix="api-key-template-tab"
+                controls="api-key-template-tabpanel"
+                size="sm"
+                className="w-max"
+              />
             </div>
-            {files.map((file) => (
-              <TabsContent key={file.path} value={file.path}>
+            {activeFile && (
+              <div
+                role="tabpanel"
+                id="api-key-template-tabpanel"
+                aria-labelledby={`api-key-template-tab-${activeFile.path}`}
+                className="pt-2"
+              >
                 <pre className="max-h-96 overflow-auto rounded-panel border border-border bg-subtle p-3 text-caption text-fg-1">
-                  <code>{file.content}</code>
+                  <code>{activeFile.content}</code>
                 </pre>
-              </TabsContent>
-            ))}
-          </Tabs>
+              </div>
+            )}
+          </div>
         ) : null}
       </div>
     </div>

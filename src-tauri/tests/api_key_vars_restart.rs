@@ -436,14 +436,14 @@ fn seed_negative(home: &Path) {
     .expect("seed missing-reference Pi live node");
     let mut missing = state
         .db
-        .get_provider_by_id("restart-pi-missing", AppType::Pi.as_str())
+        .get_provider_by_id("restart-pi-missing", &AppType::Pi)
         .expect("read missing provider")
         .expect("missing provider exists");
     missing.settings_config["apiKey"] = json!(ref_for(MISSING));
     missing.settings_config["models"][0]["apiKey"] = json!(ref_for(MISSING));
     state
         .db
-        .save_provider(AppType::Pi.as_str(), &missing)
+        .save_provider(&AppType::Pi, &missing)
         .expect("persist missing reference template");
 
     ProviderService::add(&state, AppType::Pi, pi_provider("restart-pi-removed"), true)
@@ -604,13 +604,13 @@ fn seed_proxy(home: &Path) {
     runtime.block_on(async {
         let mut config = state
             .db
-            .get_proxy_config()
+            .get_global_proxy_config()
             .await
             .expect("read proxy config");
         config.listen_port = 0;
         state
             .db
-            .update_proxy_config(config)
+            .update_global_proxy_config(config)
             .await
             .expect("set isolated random proxy port");
         mode::controller::enter(&state, &AppType::Claude, false)
@@ -748,7 +748,7 @@ fn assert_non_claude_templates(state: &AppState) {
     ] {
         let provider = state
             .db
-            .get_provider_by_id(id, app.as_str())
+            .get_provider_by_id(id, &app)
             .expect("read provider after Claude failure")
             .expect("provider exists after Claude failure");
         assert_eq!(
@@ -777,7 +777,7 @@ fn assert_negative_templates(state: &AppState) {
     ] {
         let provider = state
             .db
-            .get_provider_by_id(id, AppType::Pi.as_str())
+            .get_provider_by_id(id, &AppType::Pi)
             .expect("read negative provider")
             .expect("negative provider exists");
         let template = ref_for(variable);
@@ -789,7 +789,7 @@ fn assert_negative_templates(state: &AppState) {
     }
     let multi = state
         .db
-        .get_provider_by_id("restart-pi-multi-expired", AppType::Pi.as_str())
+        .get_provider_by_id("restart-pi-multi-expired", &AppType::Pi)
         .expect("read multi-reference provider")
         .expect("multi-reference provider exists");
     let valid_template = ref_for(MULTI_VALID);
@@ -859,7 +859,7 @@ fn assert_db_templates(state: &AppState) {
     ] {
         let provider = state
             .db
-            .get_provider_by_id(id, app.as_str())
+            .get_provider_by_id(id, &app)
             .expect("read stored provider")
             .expect("stored provider exists");
         assert_eq!(

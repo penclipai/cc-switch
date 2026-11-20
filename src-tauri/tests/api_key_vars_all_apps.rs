@@ -15,7 +15,7 @@ use cc_switch_lib::{
 };
 use serde_json::json;
 
-#[path = "support/mod.rs"]
+#[path = "integration/support/mod.rs"]
 mod support;
 use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
 
@@ -313,7 +313,7 @@ fn refresh_projects_shared_key_to_all_additive_apps_without_enabling_drafts() {
         );
         let draft = state
             .db
-            .get_provider_by_id(&format!("{}-draft", app.as_str()), app.as_str())
+            .get_provider_by_id(&format!("{}-draft", app.as_str()), &app)
             .expect("read draft")
             .expect("draft row");
         assert!(
@@ -461,7 +461,7 @@ fn claude_desktop_direct_profile_resolves_variable_and_keeps_database_template()
     );
     let saved = state
         .db
-        .get_provider_by_id("desktop-var", AppType::ClaudeDesktop.as_str())
+        .get_provider_by_id("desktop-var", &AppType::ClaudeDesktop)
         .expect("read Desktop provider")
         .expect("saved Desktop provider");
     assert_eq!(
@@ -515,7 +515,7 @@ fn codex_toml_bearer_references_use_root_fallback_and_table_source_independently
     assert_eq!(live.matches(SECOND).count(), 1, "{live}");
     let saved_root = state
         .db
-        .get_provider_by_id("codex-root-bearer", AppType::Codex.as_str())
+        .get_provider_by_id("codex-root-bearer", &AppType::Codex)
         .expect("read Codex row")
         .expect("saved Codex row");
     assert_eq!(
@@ -550,7 +550,7 @@ fn codex_toml_bearer_references_use_root_fallback_and_table_source_independently
     assert_eq!(live.matches(THIRD).count(), 1, "{live}");
     let saved_table = state
         .db
-        .get_provider_by_id("codex-table-bearer", AppType::Codex.as_str())
+        .get_provider_by_id("codex-table-bearer", &AppType::Codex)
         .expect("read table Codex row")
         .expect("saved table Codex row");
     assert_eq!(
@@ -595,7 +595,7 @@ fn unsynced_universal_reference_blocks_deletion_and_rename_keeps_derived_templat
         .db
         .get_provider_by_id(
             "universal-claude-universal-unsynced",
-            AppType::Claude.as_str(),
+            &AppType::Claude,
         )
         .expect("read derived child")
         .expect("derived Claude child");
@@ -618,7 +618,9 @@ fn unsynced_universal_reference_blocks_deletion_and_rename_keeps_derived_templat
         Some(VAR),
     )
     .expect("rename variable and all dependent templates atomically");
-    let universal = ProviderService::get_universal(&state, "universal-unsynced")
+    let universal = state
+        .db
+        .get_universal_provider("universal-unsynced")
         .expect("read universal")
         .expect("universal remains");
     assert_eq!(universal.api_key, format!("{{{{{renamed}}}}}"));
@@ -626,7 +628,7 @@ fn unsynced_universal_reference_blocks_deletion_and_rename_keeps_derived_templat
         .db
         .get_provider_by_id(
             "universal-claude-universal-unsynced",
-            AppType::Claude.as_str(),
+            &AppType::Claude,
         )
         .expect("read renamed child")
         .expect("child remains");

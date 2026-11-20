@@ -7,7 +7,7 @@ use cc_switch_lib::api_key_vars::{
 use cc_switch_lib::{AppState, AppType, Database, MultiAppConfig, Provider, ProviderService};
 use serde_json::{json, Value};
 
-#[path = "support/mod.rs"]
+#[path = "integration/support/mod.rs"]
 mod support;
 
 fn config() -> ApiKeyRefreshConfig {
@@ -76,7 +76,7 @@ fn expired_key_blocks_switch_without_touching_current_or_live_config() {
     assert_eq!(
         state
             .db
-            .get_current_provider("claude")
+            .get_current_provider(&AppType::Claude)
             .expect("current row"),
         Some("current".to_string())
     );
@@ -103,7 +103,7 @@ fn expired_key_blocks_switch_without_touching_current_or_live_config() {
     assert_eq!(
         state
             .db
-            .get_current_provider("claude")
+            .get_current_provider(&AppType::Claude)
             .expect("current row"),
         Some("current".to_string())
     );
@@ -128,7 +128,7 @@ fn expired_key_blocks_switch_without_touching_current_or_live_config() {
     assert_eq!(
         state
             .db
-            .get_current_provider("claude")
+            .get_current_provider(&AppType::Claude)
             .expect("current unchanged"),
         Some("current".to_string())
     );
@@ -149,13 +149,13 @@ fn expired_key_blocks_switch_without_touching_current_or_live_config() {
     assert_eq!(
         state
             .db
-            .get_current_provider("claude")
+            .get_current_provider(&AppType::Claude)
             .expect("current refreshed"),
         Some("expired".to_string())
     );
     let row = state
         .db
-        .get_provider_by_id("expired", "claude")
+        .get_provider_by_id("expired", &AppType::Claude)
         .expect("read provider")
         .expect("provider exists");
     assert_eq!(
@@ -203,7 +203,7 @@ fn editing_current_provider_to_an_expired_variable_preserves_row_and_live_config
 
     let mut edited = state
         .db
-        .get_provider_by_id("current", "claude")
+        .get_provider_by_id("current", &AppType::Claude)
         .expect("read current provider")
         .expect("current provider exists");
     edited.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] = json!("{{EDIT_EXPIRY_KEY}}");
@@ -216,7 +216,7 @@ fn editing_current_provider_to_an_expired_variable_preserves_row_and_live_config
     );
     let saved = state
         .db
-        .get_provider_by_id("current", "claude")
+        .get_provider_by_id("current", &AppType::Claude)
         .expect("read saved provider")
         .expect("saved provider exists");
     assert_eq!(
@@ -308,7 +308,7 @@ fn editor_save_of_expired_key_keeps_existing_rows_and_live_files() {
 
         let before_row = state
             .db
-            .get_provider_by_id(id, app_type.as_str())
+            .get_provider_by_id(id, &app_type)
             .expect("read initial provider")
             .expect("initial provider exists");
         let before_live = std::fs::read(&live_path).expect("read initial live file");
@@ -365,7 +365,7 @@ fn editor_save_of_expired_key_keeps_existing_rows_and_live_files() {
         );
         let saved = state
             .db
-            .get_provider_by_id(id, app_type.as_str())
+            .get_provider_by_id(id, &app_type)
             .expect("read saved provider")
             .expect("saved provider exists");
         assert_eq!(
@@ -460,7 +460,7 @@ fn first_editor_add_of_expired_key_creates_no_provider_or_live_file() {
         assert!(
             state
                 .db
-                .get_provider_by_id(id, app_type.as_str())
+                .get_provider_by_id(id, &app_type)
                 .expect("read provider")
                 .is_none(),
             "{app_type:?} persisted an invalid provider"
@@ -535,7 +535,7 @@ fn editor_drafts_may_retain_expired_references_when_not_projected() {
     assert_eq!(
         state
             .db
-            .get_provider_by_id("draft", AppType::Claude.as_str())
+            .get_provider_by_id("draft", &AppType::Claude)
             .expect("read draft")
             .expect("draft exists")
             .settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
@@ -587,13 +587,13 @@ fn proxy_route_editor_save_rejects_expired_key_before_row_write() {
     runtime.block_on(async {
         let mut proxy = state
             .db
-            .get_proxy_config()
+            .get_global_proxy_config()
             .await
             .expect("read proxy config");
         proxy.listen_port = 0;
         state
             .db
-            .update_proxy_config(proxy)
+            .update_global_proxy_config(proxy)
             .await
             .expect("use isolated random proxy port");
         cc_switch_lib::mode::controller::enter_with_route(
@@ -608,7 +608,7 @@ fn proxy_route_editor_save_rejects_expired_key_before_row_write() {
 
     let before = state
         .db
-        .get_provider_by_id("route", AppType::Claude.as_str())
+        .get_provider_by_id("route", &AppType::Claude)
         .expect("read route")
         .expect("route exists");
     let base = ProviderService::editor_view(&state, AppType::Claude, &before.settings_config, None)
@@ -641,7 +641,7 @@ fn proxy_route_editor_save_rejects_expired_key_before_row_write() {
         serde_json::to_value(
             state
                 .db
-                .get_provider_by_id("route", AppType::Claude.as_str())
+                .get_provider_by_id("route", &AppType::Claude)
                 .expect("read saved route")
                 .expect("saved route exists"),
         )
@@ -702,13 +702,13 @@ fn proxy_stack_editor_save_rejects_expired_key_before_row_write() {
     runtime.block_on(async {
         let mut proxy = state
             .db
-            .get_proxy_config()
+            .get_global_proxy_config()
             .await
             .expect("read proxy config");
         proxy.listen_port = 0;
         state
             .db
-            .update_proxy_config(proxy)
+            .update_global_proxy_config(proxy)
             .await
             .expect("use isolated random proxy port");
         cc_switch_lib::mode::controller::enter_with_route(
@@ -733,7 +733,7 @@ fn proxy_stack_editor_save_rejects_expired_key_before_row_write() {
     let before_live = std::fs::read(&live_path).expect("read Stack contract");
     let before = state
         .db
-        .get_provider_by_id("stack-member", AppType::Claude.as_str())
+        .get_provider_by_id("stack-member", &AppType::Claude)
         .expect("read Stack member")
         .expect("Stack member exists");
     let base = ProviderService::editor_view(&state, AppType::Claude, &before.settings_config, None)
@@ -770,7 +770,7 @@ fn proxy_stack_editor_save_rejects_expired_key_before_row_write() {
         serde_json::to_value(
             state
                 .db
-                .get_provider_by_id("stack-member", AppType::Claude.as_str())
+                .get_provider_by_id("stack-member", &AppType::Claude)
                 .expect("read saved Stack member")
                 .expect("saved Stack member exists"),
         )
@@ -863,7 +863,7 @@ fn expired_desktop_switch_keeps_current_pointer_and_profile_bytes() {
     assert_eq!(
         state
             .db
-            .get_current_provider(AppType::ClaudeDesktop.as_str())
+            .get_current_provider(&AppType::ClaudeDesktop)
             .expect("desktop current"),
         Some("desktop-current".to_string())
     );

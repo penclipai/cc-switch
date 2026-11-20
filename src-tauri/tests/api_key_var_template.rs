@@ -13,7 +13,7 @@ const EXPECTED_TEMPLATE_PATHS: [&str; 6] = [
 
 use cc_switch_lib::api_key_vars::{self, template, ApiKeyVarInput};
 
-#[path = "support/mod.rs"]
+#[path = "integration/support/mod.rs"]
 #[allow(dead_code)]
 mod support;
 use support::{ensure_test_home, test_mutex};

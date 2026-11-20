@@ -1,0 +1,10 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignoreExportsUsedInFile": true,
+  "ignore": [
+    "src/components/ui/**",
+    "scripts/test-api-key-var-template.mjs",
+    "src-tauri/resources/api-key-var-template/**"
+  ],
+  "ignoreDependencies": ["@vitest/coverage-v8"]
+}

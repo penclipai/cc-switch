@@ -6,16 +6,16 @@ use crate::provider::Provider;
 use crate::services::api_key_vars::runner::{ApiKeyRefreshConfig, ApiKeyRefreshState};
 use crate::settings::{get_settings, update_settings, AppSettings};
 use crate::store::AppState;
+use crate::test_support::EnvVars;
 use serde_json::json;
 use serial_test::serial;
-use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 struct Fixture {
     previous_settings: AppSettings,
-    previous_env: Vec<(&'static str, Option<OsString>)>,
+    _env: EnvVars,
     config_path: PathBuf,
     state: AppState,
     _dir: tempfile::TempDir,
@@ -24,12 +24,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let previous_env = ["CC_SWITCH_TEST_HOME", "OPENCODE_DB"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect();
-        std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
-        std::env::set_var("OPENCODE_DB", dir.path().join("opencode.db"));
+        let env = EnvVars::new()
+            .set("CC_SWITCH_TEST_HOME", dir.path())
+            .set("OPENCODE_DB", dir.path().join("opencode.db"));
         let previous_settings = get_settings();
         let config_dir = dir.path().join("opencode");
         fs::create_dir_all(&config_dir).unwrap();
@@ -40,7 +37,7 @@ impl Fixture {
         .unwrap();
         Self {
             previous_settings,
-            previous_env,
+            _env: env,
             config_path: config_dir.join("opencode.json"),
             state: AppState::new(Arc::new(Database::memory().unwrap())),
             _dir: dir,
@@ -50,7 +47,7 @@ impl Fixture {
     fn imported(&self) -> Provider {
         self.state
             .db
-            .get_provider_by_id("opencode-go", "opencode")
+            .get_provider_by_id("opencode-go", &AppType::OpenCode)
             .unwrap()
             .unwrap()
     }
@@ -60,12 +57,6 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         // Restore the cached settings while writes still target the temporary home.
         update_settings(self.previous_settings.clone()).unwrap();
-        for (key, value) in &self.previous_env {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
     }
 }
 
@@ -178,7 +169,7 @@ fn opencode_reimport_preserves_wrapper_templates_after_restart() {
         );
         first_process
             .db
-            .save_provider(AppType::OpenCode.as_str(), &provider)
+            .save_provider(&AppType::OpenCode, &provider)
             .unwrap();
     }
     drop(first_process);
@@ -201,7 +192,7 @@ fn opencode_reimport_preserves_wrapper_templates_after_restart() {
     for (id, _, api_key_path) in &cases {
         let saved = restarted
             .db
-            .get_provider_by_id(id, AppType::OpenCode.as_str())
+            .get_provider_by_id(id, &AppType::OpenCode)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -282,7 +273,7 @@ fn opencode_builtin_incomplete_copies_cannot_be_added_to_live() {
         let saved = fixture
             .state
             .db
-            .get_provider_by_id(&id, "opencode")
+            .get_provider_by_id(&id, &AppType::OpenCode)
             .unwrap()
             .unwrap();
         assert_eq!(saved.meta.unwrap().live_config_managed, Some(false));
@@ -319,7 +310,7 @@ fn additive_add_rolls_back_row_when_live_config_cannot_be_parsed() {
     assert!(fixture
         .state
         .db
-        .get_provider_by_id("custom-new", "opencode")
+        .get_provider_by_id("custom-new", &AppType::OpenCode)
         .unwrap()
         .is_none());
     assert_eq!(fs::read_to_string(&fixture.config_path).unwrap(), broken);
@@ -365,7 +356,7 @@ fn opencode_builtin_credential_only_import_does_not_create_config() {
     assert!(fixture
         .state
         .db
-        .get_all_providers("opencode")
+        .get_all_providers(&AppType::OpenCode)
         .unwrap()
         .is_empty());
     assert_eq!(fs::read(&db_path).unwrap(), original_db);
@@ -448,7 +439,7 @@ fn opencode_jsonc_provider_and_mcp_workflows_preserve_comments() {
             json!({"type":"http","url":"https://example.com/mcp"}),
         ),
     ] {
-        crate::mcp::sync_single_server_to_opencode(&config, id, &spec).unwrap();
+        crate::mcp::sync_single_server_to_opencode(id, &spec).unwrap();
     }
     let servers = opencode_config::get_mcp_servers().unwrap();
     assert_eq!(servers["existing"]["command"], json!(["npx", "updated"]));

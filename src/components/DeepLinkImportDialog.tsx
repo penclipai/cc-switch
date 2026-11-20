@@ -32,13 +32,14 @@ import {
 } from "@/utils/deeplinkRisk";
 import { decodeBase64Utf8 } from "@/lib/utils/base64";
 import { Switch } from "@/components/ui/switch";
-import { getAppLabel, isAdditiveAppId } from "@/config/appConfig";
+import { getAppLabel } from "@/config/appConfig";
 import { normalizeIconDataUri } from "@/utils/customIcon";
 import {
   CODING_PLAN_PROVIDERS,
   codingPlanEnabledByDefault,
   detectCodingPlanProvider,
 } from "@/config/codingPlanProviders";
+import { appHas } from "@/config/appSpecs";
 
 const API_FORMAT_LABELS: Record<
   NonNullable<DeepLinkImportRequest["apiFormat"]>,
@@ -72,15 +73,11 @@ async function loadLinkIcon(url: string): Promise<string | undefined> {
  */
 function initialActivation(request: DeepLinkImportRequest): boolean {
   // Antigravity 的卡没有「启用」，只导入（后端同样忽略 enabled）
-  if (
-    request.resource === "provider" &&
-    (request.app === "agy" || request.app === "copilot")
-  )
-    return false;
+  if (request.resource === "provider" && request.app === "agy") return false;
   if (
     request.resource === "provider" &&
     request.app &&
-    isAdditiveAppId(request.app)
+    appHas(request.app, "additive")
   ) {
     return request.enabled ?? true;
   }
@@ -980,7 +977,7 @@ export function DeepLinkImportDialog() {
                   )}
 
                   {/* Antigravity 的卡没有「启用」，只导入，不给这个开关 */}
-                  {request.app !== "agy" && request.app !== "copilot" && (
+                  {request.app !== "agy" && (
                     <>
                       {/*
                         导入后是否立即生效由用户决定，链接里的 enabled 只是初始值。切换式应用打开后
@@ -991,7 +988,7 @@ export function DeepLinkImportDialog() {
                           htmlFor="deeplink-activate-after-import"
                           className="text-sm font-medium"
                         >
-                          {request.app && isAdditiveAppId(request.app)
+                          {request.app && appHas(request.app, "additive")
                             ? request.app === "pi"
                               ? t("deeplink.enableInPiAfterImport")
                               : t("deeplink.addToAppAfterImport", {
@@ -1006,7 +1003,7 @@ export function DeepLinkImportDialog() {
                         />
                       </div>
                       {activateAfterImport &&
-                        !(request.app && isAdditiveAppId(request.app)) && (
+                        !(request.app && appHas(request.app, "additive")) && (
                           <div className="text-warning-text text-sm flex items-start gap-2">
                             <span aria-hidden="true">⚠️</span>
                             <span>{t("deeplink.providerEnabledWarning")}</span>

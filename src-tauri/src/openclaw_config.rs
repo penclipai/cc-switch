@@ -5,7 +5,7 @@
 
 use crate::config::{atomic_write, get_app_config_dir};
 use crate::error::AppError;
-use crate::settings::{effective_backup_retain_count, get_openclaw_override_dir};
+use crate::settings::{effective_backup_retain_count, get_override_dir};
 use chrono::Local;
 use indexmap::IndexMap;
 use json_five::rt::parser::{
@@ -33,7 +33,7 @@ const OPENCLAW_TOOLS_PROFILES: &[&str] = &["minimal", "coding", "messaging", "fu
 /// 默认路径: `~/.openclaw/`
 /// 可通过 settings.openclaw_config_dir 覆盖
 pub fn get_openclaw_dir() -> PathBuf {
-    if let Some(override_dir) = get_openclaw_override_dir() {
+    if let Some(override_dir) = get_override_dir(&crate::app_config::AppType::OpenClaw) {
         return override_dir;
     }
 
@@ -155,16 +155,6 @@ pub struct OpenClawAgentsDefaults {
     pub model: Option<OpenClawDefaultModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models: Option<HashMap<String, OpenClawModelCatalogEntry>>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
-}
-
-/// OpenClaw agents 顶层配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct OpenClawAgents {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub defaults: Option<OpenClawAgentsDefaults>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
@@ -322,7 +312,7 @@ impl OpenClawConfigDocument {
     }
 
     fn save(self) -> Result<OpenClawWriteOutcome, AppError> {
-        let _guard = openclaw_write_lock().lock()?;
+        let _guard = crate::sync_utils::lock_file_operation(openclaw_write_lock());
         self.save_locked()
     }
 
@@ -690,7 +680,7 @@ pub(crate) fn replace_provider_if_present(
     id: &str,
     provider_config: Value,
 ) -> Result<bool, AppError> {
-    let _guard = openclaw_write_lock().lock()?;
+    let _guard = crate::sync_utils::lock_file_operation(openclaw_write_lock());
     let mut document = OpenClawConfigDocument::load()?;
     let Some(source) = document.original_source.as_deref() else {
         return Ok(false);
@@ -953,14 +943,13 @@ pub fn set_tools_config(tools: &OpenClawToolsConfig) -> Result<OpenClawWriteOutc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync_utils::MutexExt;
     use serial_test::serial;
     use std::sync::{Mutex, OnceLock};
 
     fn test_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
+        LOCK.get_or_init(|| Mutex::new(())).lock_recover()
     }
 
     fn with_test_paths<T>(source: &str, test: impl FnOnce(&Path) -> T) -> T {
@@ -970,23 +959,16 @@ mod tests {
         fs::create_dir_all(&openclaw_dir).unwrap();
         let config_path = openclaw_dir.join("openclaw.json");
         fs::write(&config_path, source).unwrap();
-        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
+        let env = crate::test_support::EnvVars::new()
+            .set("CC_SWITCH_TEST_HOME", temp.path())
+            .set("HOME", temp.path());
         let result = test(&config_path);
-        match old_test_home {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
-        match old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
+        drop(env);
         result
     }
 
     #[test]
+    #[serial_test::serial]
     fn replace_if_present_never_creates_and_preserves_other_model_settings() {
         with_test_paths(
             "{ models: { mode: 'merge', providers: { one: { apiKey: 'old', extra: 1 } } }, tools: { profile: 'coding' } }",

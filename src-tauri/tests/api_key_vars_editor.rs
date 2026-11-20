@@ -11,7 +11,7 @@ use cc_switch_lib::api_key_vars::{
 };
 use cc_switch_lib::{AppType, EditorSave, Provider, ProviderService};
 
-#[path = "support/mod.rs"]
+#[path = "integration/support/mod.rs"]
 mod support;
 use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
 
@@ -62,7 +62,7 @@ fn provider(id: &str, settings: Value) -> Provider {
 fn row(state: &cc_switch_lib::AppState, app: AppType, id: &str) -> Provider {
     state
         .db
-        .get_provider_by_id(id, app.as_str())
+        .get_provider_by_id(id, &app)
         .expect("read provider")
         .expect("provider exists")
 }
@@ -494,7 +494,7 @@ fn explicit_user_key_edits_detach_current_and_historical_variable_values() {
     imported.settings_config["options"]["apiKey"] = json!(VALUE_A);
     state
         .db
-        .save_provider(AppType::OpenCode.as_str(), &imported)
+        .save_provider(&AppType::OpenCode, &imported)
         .expect("import readback preserves template");
     assert_eq!(
         row(&state, AppType::OpenCode, "historical").settings_config["options"]["apiKey"],

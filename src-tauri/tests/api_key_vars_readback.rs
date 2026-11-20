@@ -10,7 +10,7 @@ use cc_switch_lib::{
 };
 use serde_json::json;
 
-#[path = "support/mod.rs"]
+#[path = "integration/support/mod.rs"]
 mod support;
 use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
 
@@ -71,7 +71,7 @@ fn provider(app: AppType, id: &str) -> Provider {
 fn row(state: &cc_switch_lib::AppState, app: AppType, id: &str) -> Provider {
     state
         .db
-        .get_provider_by_id(id, app.as_str())
+        .get_provider_by_id(id, &app)
         .expect("read provider")
         .expect("provider exists")
 }
@@ -108,7 +108,7 @@ fn derived_readback_keeps_templates_after_rotation_and_restart_but_user_edits_de
     pi.settings_config["models"][0]["apiKey"] = json!(FIRST);
     state
         .db
-        .save_provider(AppType::Pi.as_str(), &pi)
+        .save_provider(&AppType::Pi, &pi)
         .expect("Pi client readback preserves stored template");
     let pi = row(&state, AppType::Pi, "pi-readback");
     assert_eq!(
@@ -128,7 +128,7 @@ fn derived_readback_keeps_templates_after_rotation_and_restart_but_user_edits_de
     state
         .db
         .update_provider_settings_config(
-            AppType::Mcode.as_str(),
+            &AppType::Mcode,
             "mcode-readback",
             &mcode.settings_config,
         )

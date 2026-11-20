@@ -18,7 +18,7 @@ use cc_switch_lib::api_key_vars::{
 };
 use cc_switch_lib::{AppState, AppType, Database, MultiAppConfig, Provider, ProviderService};
 
-#[path = "support/mod.rs"]
+#[path = "integration/support/mod.rs"]
 mod support;
 use support::{create_test_state_with_config, ensure_test_home, reset_test_fs, test_mutex};
 
@@ -187,7 +187,7 @@ fn claude_switch_resolves_ref_and_keeps_template_in_db() {
     assert!(!read(settings_path.clone()).contains("{{"));
     let row = state
         .db
-        .get_provider_by_id("var-claude", "claude")
+        .get_provider_by_id("var-claude", &AppType::Claude)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -211,14 +211,14 @@ fn claude_switch_resolves_ref_and_keeps_template_in_db() {
     // 写回保护：把解析后的值写回库时保留模板
     let mut resolved_row = row.clone();
     resolved_row.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] = json!("sk-var-two");
-    state.db.save_provider("claude", &resolved_row).unwrap();
+    state.db.save_provider(&AppType::Claude, &resolved_row).unwrap();
     state
         .db
-        .update_provider_settings_config("claude", "var-claude", &resolved_row.settings_config)
+        .update_provider_settings_config(&AppType::Claude, "var-claude", &resolved_row.settings_config)
         .unwrap();
     let row = state
         .db
-        .get_provider_by_id("var-claude", "claude")
+        .get_provider_by_id("var-claude", &AppType::Claude)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -250,7 +250,7 @@ fn claude_switch_resolves_ref_and_keeps_template_in_db() {
     .unwrap();
     let row = state
         .db
-        .get_provider_by_id("var-claude", "claude")
+        .get_provider_by_id("var-claude", &AppType::Claude)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -268,7 +268,7 @@ fn claude_switch_resolves_ref_and_keeps_template_in_db() {
     ProviderService::delete(&state, AppType::Claude, "var-claude").ok();
     if state
         .db
-        .get_provider_by_id("var-claude", "claude")
+        .get_provider_by_id("var-claude", &AppType::Claude)
         .unwrap()
         .is_none()
     {
@@ -429,7 +429,7 @@ fn real_node_refresh_updates_shared_live_configs_and_retries_same_value_after_li
     ] {
         state
             .db
-            .set_current_provider(app.as_str(), id)
+            .set_current_provider(&app, id)
             .expect("current provider");
     }
 
@@ -508,7 +508,7 @@ fn real_node_refresh_updates_shared_live_configs_and_retries_same_value_after_li
     ] {
         let provider = state
             .db
-            .get_provider_by_id(id, app.as_str())
+            .get_provider_by_id(id, &app)
             .expect("provider")
             .expect("provider exists");
         assert_eq!(

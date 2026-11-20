@@ -673,6 +673,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn saving_a_variable_reference_does_not_persist_its_resolved_token() {
         crate::services::api_key_vars::resolve::cache_set(
             "EDITOR_CODEX_REF",
@@ -703,6 +704,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn hiding_auth_token_uses_the_raw_reference_after_a_cache_rotation() {
         const REF: &str = "EDITOR_CODEX_TOCTOU_REF";
         crate::services::api_key_vars::resolve::cache_set(REF, true, Some("old-dummy-token"));

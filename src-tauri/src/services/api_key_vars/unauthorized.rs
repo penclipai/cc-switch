@@ -191,6 +191,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn concurrent_rejections_run_one_script_and_drop_late_responses() {
         const NAME: &str = "REJECTION_E2E";
         const TEMPLATE: &str = "{{REJECTION_E2E}}";
@@ -266,6 +267,7 @@ console.log(JSON.stringify({apiKey: 'rotated-test-key'}));"#,
     }
 
     #[test]
+    #[serial_test::serial]
     fn failed_refresh_rearms_only_new_requests_for_the_same_value() {
         const NAME: &str = "REJECTION_UNCHANGED";
         const TEMPLATE: &str = "{{REJECTION_UNCHANGED}}";

@@ -71,7 +71,7 @@ pub fn view(
     settings_config: &Value,
     category: Option<&str>,
 ) -> Result<EditorView, AppError> {
-    let official = category == Some("official");
+    let official = crate::provider::is_official_category(category);
     let Ok(projection) = GrokProjection::of_raw(settings_config, official) else {
         return Ok(EditorView {
             settings: settings_config.clone(),
@@ -325,6 +325,7 @@ model = "m"
     }
 
     #[test]
+    #[serial_test::serial]
     fn saving_a_new_variable_reference_keeps_its_template() {
         crate::services::api_key_vars::resolve::cache_set(
             "EDITOR_GROK_REF",
